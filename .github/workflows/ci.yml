@@ -1,0 +1,258 @@
+# SPDX-License-Identifier: MIT
+# Builds libgail and runs its tests on every push and pull request:
+#   linux          GCC, CUDA + Vulkan + CPU backends, tests, install + pkg-config consumer
+#   windows-msvc   MSVC, CUDA + Vulkan + CPU backends, tests
+#   windows-mingw  MinGW-w64 cross-build from Linux (Vulkan + CPU), tests under Wine
+#   macos          Apple clang, CPU backend only, tests, install + pkg-config consumer
+#   ffmpeg         FFmpeg built with the libgail encoder, encoding a test pattern
+#   release-tag    on v* tags only: the tag must match the version in gail.h
+# GitHub's runners have no GPU: the CUDA and Vulkan backends are compiled everywhere, the
+# tests run on the CPU backend (GPU tests skip themselves).
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_MANIFEST: "13.4.3"           # NVIDIA redistrib_<version>.json: CUDA 13.4.92
+  VULKAN_SDK_VERSION: "1.4.363.0"
+  FFMPEG_VERSION: "n9.0.2"
+
+jobs:
+  release-tag:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches gail.h
+        run: python3 scripts/release.py --check "$GITHUB_REF_NAME"
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history and tags: the build works out its version from them
+
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install -y ninja-build glslc libvulkan-dev pkgconf
+
+      - name: Cache CUDA
+        id: cuda-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/cuda
+          key: cuda-linux-${{ env.CUDA_MANIFEST }}-${{ hashFiles('ci/fetch_cuda.py') }}
+
+      - name: Fetch CUDA
+        if: steps.cuda-cache.outputs.cache-hit != 'true'
+        run: python3 ci/fetch_cuda.py "$RUNNER_TEMP/cuda" --manifest "$CUDA_MANIFEST"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DGAIL_ENABLE_CUDA=ON -DCMAKE_CUDA_COMPILER="$RUNNER_TEMP/cuda/bin/nvcc"
+          -DCUDAToolkit_ROOT="$RUNNER_TEMP/cuda" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gail"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install and build a consumer with pkg-config
+        run: |
+          cmake --install build
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/gail/lib/pkgconfig"
+          cc tests/test_api.c -o consumer $(pkg-config --cflags --libs gail) -Wl,-rpath,"$RUNNER_TEMP/gail/lib" -lpthread
+          ./consumer
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libgail-linux-x86_64
+          path: ${{ runner.temp }}/gail
+
+  windows-msvc:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history and tags: the build works out its version from them
+
+      - name: Cache CUDA
+        id: cuda-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\cuda
+          key: cuda-windows-${{ env.CUDA_MANIFEST }}-${{ hashFiles('ci/fetch_cuda.py') }}
+
+      - name: Fetch CUDA
+        if: steps.cuda-cache.outputs.cache-hit != 'true'
+        run: python ci/fetch_cuda.py "$env:RUNNER_TEMP\cuda" --manifest $env:CUDA_MANIFEST
+
+      - name: Cache Vulkan SDK
+        id: vulkan-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Install Vulkan SDK
+        if: steps.vulkan-cache.outputs.cache-hit != 'true'
+        run: |
+          $v = $env:VULKAN_SDK_VERSION
+          Invoke-WebRequest -UseBasicParsing "https://sdk.lunarg.com/sdk/download/$v/windows/vulkansdk-windows-X64-$v.exe" -OutFile vulkan-sdk.exe
+          $p = Start-Process -Wait -PassThru .\vulkan-sdk.exe -ArgumentList "--root","C:\VulkanSDK","--accept-licenses","--default-answer","--confirm-command","install"
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK install failed: $($p.ExitCode)" }
+
+      - name: Set up MSVC
+        run: . ci/msvc_env.ps1
+
+      - name: Configure
+        run: |
+          $env:VULKAN_SDK = "C:\VulkanSDK"
+          $env:PATH = "C:\VulkanSDK\Bin;" + $env:PATH
+          $cuda = "$env:RUNNER_TEMP\cuda" -replace '\\', '/'
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAIL_ENABLE_CUDA=ON `
+            -DCMAKE_CUDA_COMPILER="$cuda/bin/nvcc.exe" -DCUDAToolkit_ROOT="$cuda" `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP\gail"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Build
+        run: |
+          $env:PATH = "C:\VulkanSDK\Bin;" + $env:PATH
+          cmake --build build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Test
+        run: |
+          ctest --test-dir build --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Install
+        run: cmake --install build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libgail-windows-x64-msvc
+          path: ${{ runner.temp }}\gail
+
+  windows-mingw:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history and tags: the build works out its version from them
+
+      - name: Install packages
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y ninja-build glslc libvulkan-dev mingw-w64 g++-mingw-w64-x86-64-posix wine wine64
+          # std::thread needs the POSIX threads flavour of MinGW-w64
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+
+      - name: Configure
+        run: |
+          mkdir -p "$RUNNER_TEMP/vkinc"
+          ln -sfn /usr/include/vulkan "$RUNNER_TEMP/vkinc/vulkan"
+          ln -sfn /usr/include/vk_video "$RUNNER_TEMP/vkinc/vk_video"
+          cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake \
+            -DGAIL_VULKAN_INCLUDE_DIR="$RUNNER_TEMP/vkinc" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gail"
+
+      - name: Build
+        run: cmake --build build-win
+
+      - name: Test under Wine
+        env:
+          WINEDEBUG: -all
+        run: |
+          wineboot --init 2>/dev/null || true
+          ctest --test-dir build-win --output-on-failure
+
+      - name: Install
+        run: cmake --install build-win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libgail-windows-x64-mingw
+          path: ${{ runner.temp }}/gail
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history and tags: the build works out its version from them
+
+      - name: Install packages
+        run: brew install ninja pkgconf
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DGAIL_ENABLE_VULKAN=OFF -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gail"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install and build a consumer with pkg-config
+        run: |
+          cmake --install build
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/gail/lib/pkgconfig"
+          cc tests/test_api.c -o consumer $(pkg-config --cflags --libs gail) -Wl,-rpath,"$RUNNER_TEMP/gail/lib"
+          ./consumer
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libgail-macos-arm64
+          path: ${{ runner.temp }}/gail
+
+  ffmpeg:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history and tags: the build works out its version from them
+
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install -y ninja-build glslc libvulkan-dev pkgconf
+
+      - name: Build and install libgail
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAIL_ENABLE_CUDA=OFF \
+            -DGAIL_BUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gail"
+          cmake --build build
+          cmake --install build
+
+      - name: Build FFmpeg with the libgail encoder
+        run: |
+          git clone --depth 1 --branch "$FFMPEG_VERSION" https://github.com/FFmpeg/FFmpeg.git "$RUNNER_TEMP/ffmpeg"
+          integrations/ffmpeg/add-to-ffmpeg.sh "$RUNNER_TEMP/ffmpeg"
+          cd "$RUNNER_TEMP/ffmpeg"
+          PKG_CONFIG_PATH="$RUNNER_TEMP/gail/lib/pkgconfig" ./configure --disable-doc --disable-x86asm \
+            --disable-everything --enable-libgail --enable-encoder=libgail --enable-indev=lavfi --enable-decoder=wrapped_avframe \
+            --enable-filter=testsrc2,format,scale,pad,null --enable-muxer=image2 --enable-protocol=file \
+            --extra-ldflags="-Wl,-rpath,$RUNNER_TEMP/gail/lib"
+          make -j"$(nproc)" ffmpeg
+
+      - name: Encode a test pattern
+        run: |
+          ff="$RUNNER_TEMP/ffmpeg/ffmpeg"
+          "$ff" -hide_banner -h encoder=libgail
+          mkdir j2c
+          "$ff" -hide_banner -f lavfi -i testsrc2=size=1920x1080:rate=24 -frames:v 4 \
+            -pix_fmt yuv420p10le -c:v libgail -f image2 j2c/%03d.j2c
+          ./build/gail-check j2c/*.j2c

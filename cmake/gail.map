@@ -1,0 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+GAIL_1 {
+  global: gail_*;
+  local: *;
+};

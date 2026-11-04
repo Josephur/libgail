@@ -1,0 +1,52 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Gather the Tier-1 results into dense host-visible buffers: per-block info
+// records, the used part of the pass tables, and the codewords.
+#include "common.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint64_t info;      // U32Buf (device)
+    uint64_t offsets;   // U32Buf from scan.comp
+    uint64_t src;       // U32Buf MQ output (4-byte aligned per block)
+    uint64_t passLen;   // U32Buf [cb * MAX_PASSES + k]
+    uint64_t passDist;  // U32Buf
+    uint64_t hostInfo;  // U32Buf, 5 words per block (nbps, passes, offset, len, passBase)
+    uint64_t hostPass;  // U32Buf: lengths [0, passCap), distortions [passCap, 2*passCap)
+    uint64_t hostData;  // U32Buf
+    uint numCblks;
+    uint dataCapacity;  // bytes
+    uint passCapacity;  // entries
+};
+
+void main() {
+    uint cb = gl_WorkGroupID.x;
+    if (cb >= numCblks) return;
+    U32Buf INFO = U32Buf(info);
+    U32Buf OFF = U32Buf(offsets);
+    uint np = INFO.v[4u * cb + 1u];
+    uint len = INFO.v[4u * cb + 3u];
+    uint dOff = OFF.v[2u * cb], pOff = OFF.v[2u * cb + 1u];
+    uint t = gl_LocalInvocationID.x;
+    if (t == 0u) {
+        U32Buf HI = U32Buf(hostInfo);
+        HI.v[5u * cb] = INFO.v[4u * cb];
+        HI.v[5u * cb + 1u] = np;
+        HI.v[5u * cb + 2u] = dOff;
+        HI.v[5u * cb + 3u] = len;
+        HI.v[5u * cb + 4u] = pOff;
+    }
+    if (pOff + np <= passCapacity && t < np) {
+        U32Buf HP = U32Buf(hostPass);
+        HP.v[pOff + t] = U32Buf(passLen).v[cb * MAX_PASSES + t];
+        HP.v[passCapacity + pOff + t] = U32Buf(passDist).v[cb * MAX_PASSES + t];
+    }
+    uint words = (len + 3u) >> 2;
+    if (len == 0u || dOff + words * 4u > dataCapacity) return;  // host detects overflow from the totals
+    uint s = INFO.v[4u * cb + 2u] >> 2;
+    uint d = dOff >> 2;
+    U32Buf S = U32Buf(src);
+    U32Buf D = U32Buf(hostData);
+    for (uint i = t; i < words; i += 64u) D.v[d + i] = S.v[s + i];
+}

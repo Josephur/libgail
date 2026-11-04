@@ -1,0 +1,362 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// EBCOT Tier-1 context modelling on the GPU.
+//
+// One 32-lane subgroup codes one 32x32 code-block; lane x owns column x and keeps
+// the column's significance / sign / refinement / visited state as 32-bit row
+// masks in registers. Neighbour columns are fetched with subgroup shuffles.
+//
+// Within a pass, the scan order (stripes of 4 rows, column by column) makes the
+// significance propagation pass causal: a coefficient may become eligible because
+// a neighbour earlier in the scan became significant in the same pass. That
+// dependency is resolved per stripe as a monotone fixpoint over the 32 columns
+// (usually 1-2 iterations). The magnitude refinement and cleanup passes have no
+// such dependency: their coded sets follow directly from the masks, and contexts
+// are evaluated with the exact "state at time of coding" rules. Every lane emits
+// its column's symbols; a subgroup prefix sum places them in scan order, giving a
+// symbol stream identical to the sequential reference coder. The MQ coder then
+// runs in a separate kernel (t1_mq.comp), one code-block per invocation.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_vote : require
+#include "common.glsl"
+#define GAIL_GLSL 1
+#include "kernels/t1_common.h"
+
+#define SUBGROUPS 4
+#define SYM_CAP 2560
+
+layout(local_size_x = 128) in;
+
+layout(push_constant) uniform PC {
+    uint64_t planes;    // F32Buf wavelet planes: the shader quantises its block itself
+    uint64_t cblkTab;   // U32Buf, 4 words per code-block
+    uint64_t info;      // U32Buf, 4 words per code-block (nbps, passes, offset, len)
+    uint64_t passEnd;   // U32Buf [cb * MAX_PASSES + k] cumulative symbol count
+    uint64_t passDist;  // I32Buf [cb * MAX_PASSES + k]
+    uint64_t chunks;    // U32Buf [cb * 2 * MAX_PLANES + 2j] symbol chunk (offset, count) per plane
+    uint64_t symbols;   // U8Buf
+    uint64_t counters;  // U32Buf: [0] symbol allocator, [2] error flags
+    uint64_t bandTab;   // U32Buf, 4 words per band: invDelta, maxMag, distortion scale, -
+    uint64_t frameParams;  // F32Buf: [0] slope threshold (0 = code all passes), [1] est. bits per symbol
+    uint numCblks;
+    uint symCapacity;
+    uint maxPasses;
+    uint stride;     // plane row pitch (floats)
+    uint planeSize;  // floats per component plane
+};
+
+shared uint s_mag[SUBGROUPS][32][32];
+shared uint8_t s_sym[SUBGROUPS][SYM_CAP];
+shared uint s_hist[SUBGROUPS][19];  // per-context symbol counts of the current plane: zeros | ones << 16
+bool g_track;                        // early termination active: keep the histograms
+
+uint lane;
+uint sg;
+uint64_t acc;   // up to 10 pending 6-bit symbols of this lane
+uint accN;
+
+uint bitAt(uint m, int i) { return (i < 0 || i > 31) ? 0u : ((m >> uint(i)) & 1u); }
+
+int chi(uint sigm, uint sgnm, int i) { return bitAt(sigm, i) == 0u ? 0 : (bitAt(sgnm, i) != 0u ? -1 : 1); }
+
+void emit(uint cx, uint d) {
+    acc |= uint64_t((cx << 1) | d) << (6u * accN);
+    ++accN;
+    if (g_track) atomicAdd(s_hist[sg][cx], d != 0u ? 0x10000u : 1u);
+}
+
+// Empirical-entropy estimate (bytes) of the plane's symbols: an adaptive arithmetic
+// coder gets close to sum_ctx n * H(n1 / n), plus a little per active context.
+float planeBytesEstimate() {
+    float bits = 0.0;
+    if (lane < 19u) {
+        uint h = s_hist[sg][lane];
+        float n0 = float(h & 0xFFFFu), n1 = float(h >> 16), n = n0 + n1;
+        if (n > 0.0) {
+            float p0 = max(n0, 0.5) / n, p1 = max(n1, 0.5) / n;
+            bits = -(n0 * log2(p0) + n1 * log2(p1)) + 2.0;
+        }
+        s_hist[sg][lane] = 0u;
+    }
+    return subgroupAdd(bits) * 0.125 + 1.0;
+}
+
+// Remaining squared error (in units of delta^2) of this lane's column once bitplanes >= p
+// are known, with mid-point reconstruction.
+float residualEnergy(int p, int h) {
+    float e = 0.0;
+    float step = exp2(float(p));
+    for (int r = 0; r < h; ++r) {
+        uint m = s_mag[sg][r][lane];
+        float v = float(m) * (1.0 / 64.0);
+        uint q = m >> uint(p + 6);
+        float rec = q == 0u ? 0.0 : (float(q) + 0.5) * step;
+        e += (v - rec) * (v - rec);
+    }
+    return e;
+}
+
+uint shUp(uint v) {
+    uint r = subgroupShuffleUp(v, 1u);
+    return lane == 0u ? 0u : r;
+}
+uint shDown(uint v) {
+    uint r = subgroupShuffleDown(v, 1u);
+    return lane == 31u ? 0u : r;
+}
+
+// Append each lane's pending symbols to the plane buffer in lane (= scan) order.
+uint flushSymbols(uint planeCount) {
+    uint off = subgroupExclusiveAdd(accN);
+    uint tot = subgroupAdd(accN);
+    uint dst = planeCount + off;
+    for (uint j = 0u; j < accN; ++j) {
+        if (dst + j < SYM_CAP) s_sym[sg][dst + j] = uint8_t((acc >> (6u * j)) & 63u);
+    }
+    acc = 0ul;
+    accN = 0u;
+    return planeCount + tot;
+}
+
+void codeZcSign(uint CL, uint CR, uint CU, uint CD, uint sgnL, uint sgnR, uint sgn, uint Bp, int r, int orient,
+                bool zc, inout int dist, int p) {
+    if (zc) {
+        int hh = int(bitAt(CL, r) + bitAt(CR, r));
+        int vv = int(bitAt(CU, r - 1) + bitAt(CD, r + 1));
+        int dd = int(bitAt(CL, r - 1) + bitAt(CL, r + 1) + bitAt(CR, r - 1) + bitAt(CR, r + 1));
+        emit(t1_zc_ctx(hh, vv, dd, orient), bitAt(Bp, r));
+    }
+    if (bitAt(Bp, r) != 0u) {
+        int hc = clamp(chi(CL, sgnL, r) + chi(CR, sgnR, r), -1, 1);
+        int vc = clamp(chi(CU, sgn, r - 1) + chi(CD, sgn, r + 1), -1, 1);
+        uint sc = t1_sc_ctx(hc, vc);
+        emit(sc & 0xFFu, bitAt(sgn, r) ^ (sc >> 8));
+        dist += t1_dist_sig((s_mag[sg][r][lane] >> uint(p)) & 0x7Fu);
+    }
+}
+
+void main() {
+    lane = gl_SubgroupInvocationID;
+    sg = gl_SubgroupID;
+    uint cb = gl_WorkGroupID.x * SUBGROUPS + sg;
+    if (cb >= numCblks) return;
+
+    U32Buf T = U32Buf(cblkTab);
+    uint packed = T.v[4u * cb + 3u];
+    int w = CB_W(packed), h = CB_H(packed), orient = CB_ORIENT(packed);
+    U32Buf INFO = U32Buf(info);
+    U32Buf PE = U32Buf(passEnd);
+    I32Buf PD = I32Buf(passDist);
+    U32Buf CH = U32Buf(chunks);
+    U8Buf SY = U8Buf(symbols);
+    U32Buf CNT = U32Buf(counters);
+
+    uint sgn = 0u, colMax = 0u;
+    {
+        // dead-zone quantisation of this block (same arithmetic as quantize.comp)
+        uint band = T.v[4u * cb], ax = T.v[4u * cb + 1u], ay = T.v[4u * cb + 2u];
+        U32Buf B = U32Buf(bandTab);
+        float inv = uintBitsToFloat(B.v[4u * band]);
+        uint maxMag = B.v[4u * band + 1u];
+        F32Buf PL = F32Buf(planes);
+        uint pbase = CB_COMP(packed) * planeSize + ay * stride + ax + lane;
+        for (int r = 0; r < 32; ++r) {
+            uint c = 0u;
+            if (int(lane) < w && r < h) {
+                float v = PL.v[pbase + uint(r) * stride];
+                float q = abs(v) * inv * 64.0;
+                uint m = q >= float(maxMag) ? maxMag : uint(q);
+                c = m | ((v < 0.0 && m >= 64u) ? 0x80000000u : 0u);
+            }
+            s_mag[sg][r][lane] = c & 0x7FFFFFFFu;
+            sgn |= (c >> 31) << uint(r);
+            colMax = max(colMax, c & 0x7FFFFFFFu);
+        }
+    }
+    subgroupMemoryBarrierShared();
+    uint maxMag = subgroupMax(colMax) >> 6;
+    int nbps = maxMag == 0u ? 0 : findMSB(maxMag) + 1;
+    if (nbps == 0 || nbps > MAX_PLANES) {
+        if (lane == 0u) {
+            INFO.v[4u * cb] = 0u;
+            INFO.v[4u * cb + 1u] = 0u;
+            if (nbps > MAX_PLANES) atomicOr(CNT.v[2], 4u);
+        }
+        return;
+    }
+
+    F32Buf FP = F32Buf(frameParams);
+    float slopeThresh = FP.v[0];
+    g_track = slopeThresh > 0.0;
+    if (lane < 19u) s_hist[sg][lane] = 0u;
+    subgroupMemoryBarrierShared();
+    float distScale = uintBitsToFloat(U32Buf(bandTab).v[4u * T.v[4u * cb] + 2u]);
+    bool stop = false;
+    uint planesCoded = 0u;
+
+    uint sgnL = shUp(sgn), sgnR = shDown(sgn);
+    bool laneValid = int(lane) < w;
+    uint rowsValid = h >= 32 ? 0xFFFFFFFFu : ((1u << uint(h)) - 1u);
+    uint colMask = laneValid ? rowsValid : 0u;
+
+    uint sig = 0u, refd = 0u;
+    uint symTotal = 0u;
+    uint np = 0u;
+    acc = 0ul;
+    accN = 0u;
+    int nstripes = (h + 3) / 4;
+    bool overflow = false;
+
+    for (int p = nbps - 1; p >= 0 && np < maxPasses; --p) {
+        uint Bp = 0u;
+        for (int r = 0; r < h; ++r) Bp |= ((s_mag[sg][r][lane] >> uint(p + 6)) & 1u) << uint(r);
+        uint planeCount = 0u;
+        int planeDist = 0;
+        uint sig0 = sig;
+        uint vis = 0u;
+
+        for (int type = (p == nbps - 1 ? 2 : 0); type < 3 && np < maxPasses; ++type) {
+            int dist = 0;
+            if (type == 0) {
+                // ---- significance propagation ----
+                for (int s = 0; s < nstripes; ++s) {
+                    int r0 = 4 * s;
+                    uint SM = (0xFu << uint(r0)) & colMask;
+                    uint S = sig;
+                    uint SL = shUp(S), SR = shDown(S);
+                    uint cand = ~S & SM;
+                    uint nS = (S << 1) | (S >> 1) | SL | (SL << 1) | (SL >> 1) | SR | (SR << 1) | (SR >> 1);
+                    uint NEW = 0u, E = 0u, NL = 0u;
+                    for (;;) {
+                        NL = shUp(NEW);
+                        uint e = cand & (nS | NL | (NL << 1) | (NL >> 1));
+                        uint nn = e & Bp;
+                        e |= cand & (nn << 1);
+                        nn = e & Bp;
+                        e |= cand & (nn << 1);
+                        nn = e & Bp;
+                        e |= cand & (nn << 1);
+                        nn = e & Bp;
+                        bool changed = nn != NEW;
+                        NEW = nn;
+                        E = e;
+                        if (!subgroupAny(changed)) break;
+                    }
+                    NL = shUp(NEW);
+                    uint CL = SL | NL, CR = SR, CU = S | NEW, CD = S;
+                    for (int r = r0; r < r0 + 4; ++r)
+                        if (bitAt(E, r) != 0u) codeZcSign(CL, CR, CU, CD, sgnL, sgnR, sgn, Bp, r, orient, true, dist, p);
+                    planeCount = flushSymbols(planeCount);
+                    sig = S | NEW;
+                    vis |= E;
+                }
+            } else if (type == 1) {
+                // ---- magnitude refinement ----
+                uint S = sig;
+                uint SL = shUp(S), SR = shDown(S);
+                uint nAny = (S << 1) | (S >> 1) | SL | (SL << 1) | (SL >> 1) | SR | (SR << 1) | (SR >> 1);
+                for (int s = 0; s < nstripes; ++s) {
+                    int r0 = 4 * s;
+                    uint coded = sig0 & (0xFu << uint(r0)) & colMask;
+                    for (int r = r0; r < r0 + 4; ++r) {
+                        if (bitAt(coded, r) == 0u) continue;
+                        uint cx = bitAt(refd, r) != 0u ? 16u : (bitAt(nAny, r) != 0u ? 15u : 14u);
+                        emit(cx, bitAt(Bp, r));
+                        dist += t1_dist_ref((s_mag[sg][r][lane] >> uint(p)) & 0x7Fu);
+                    }
+                    planeCount = flushSymbols(planeCount);
+                }
+                refd |= sig0;
+            } else {
+                // ---- cleanup ----
+                for (int s = 0; s < nstripes; ++s) {
+                    int r0 = 4 * s;
+                    uint SM = (0xFu << uint(r0)) & colMask;
+                    uint S = sig;
+                    uint SL = shUp(S), SR = shDown(S);
+                    uint Cc = SM & ~S & ~vis;
+                    uint NEWc = Cc & Bp;
+                    uint NLc = shUp(NEWc);
+                    uint CL = SL | NLc, CR = SR, CU = S | NEWc, CD = S;
+                    uint four = 0xFu << uint(r0);
+                    bool run = laneValid && (r0 + 3 < h) && (Cc & four) == four;
+                    if (run) {
+                        uint win = r0 == 0 ? 0x1Fu : (0x3Fu << uint(r0 - 1));
+                        run = (CL & win) == 0u && (CR & win) == 0u && bitAt(S, r0 - 1) == 0u && bitAt(S, r0 + 4) == 0u;
+                    }
+                    int rs = r0;
+                    if (run) {
+                        uint nb = (NEWc >> uint(r0)) & 0xFu;
+                        if (nb == 0u) {
+                            emit(MQ_CTX_RL, 0u);
+                            rs = r0 + 4;
+                        } else {
+                            int first = findLSB(nb);
+                            emit(MQ_CTX_RL, 1u);
+                            emit(MQ_CTX_UNI, uint(first) >> 1);
+                            emit(MQ_CTX_UNI, uint(first) & 1u);
+                            codeZcSign(CL, CR, CU, CD, sgnL, sgnR, sgn, Bp, r0 + first, orient, false, dist, p);
+                            rs = r0 + first + 1;
+                        }
+                    }
+                    for (int r = rs; r < r0 + 4; ++r)
+                        if (bitAt(Cc, r) != 0u) codeZcSign(CL, CR, CU, CD, sgnL, sgnR, sgn, Bp, r, orient, true, dist, p);
+                    planeCount = flushSymbols(planeCount);
+                    sig = S | NEWc;
+                }
+            }
+            int total = subgroupAdd(dist);
+            if (lane == 0u) {
+                PE.v[cb * MAX_PASSES + np] = symTotal + planeCount;
+                PD.v[cb * MAX_PASSES + np] = total;
+            }
+            ++np;
+            planeDist += total;
+        }
+        // Early termination: stop once (a) this bitplane's estimated rate-distortion slope
+        // is below the threshold the rate control is expected to use and (b) even removing
+        // all remaining error at the cost of one more such plane could not beat it. Later
+        // planes then could only be discarded by the rate control. Judging whole planes,
+        // with an entropy-based rate estimate, keeps sparse planes (cheap run-length
+        // symbols) and zero-gain passes from stopping a block too early.
+        if (g_track) {
+            subgroupMemoryBarrierShared();
+            float bytes = planeBytesEstimate();
+            if (p > 0) {
+                float dAbs = float(planeDist) * exp2(float(2 * p)) * (1.0 / 4096.0) * distScale;
+                float rem = subgroupAdd(residualEnergy(p, h)) * distScale;
+                if (dAbs < slopeThresh * bytes && rem < slopeThresh * bytes) stop = true;
+            }
+        }
+
+        // Move this plane's symbols to global memory.
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+        uint chunkOff = 0u;
+        if (lane == 0u) {
+            chunkOff = atomicAdd(CNT.v[0], (planeCount + 15u) & ~15u);  // 16-byte aligned chunks
+            if (planeCount > SYM_CAP || chunkOff + planeCount > symCapacity) atomicOr(CNT.v[2], 1u);
+        }
+        chunkOff = subgroupBroadcastFirst(chunkOff);
+        if (chunkOff + planeCount <= symCapacity && planeCount <= SYM_CAP)
+            for (uint i = lane; i < planeCount; i += 32u) SY.v[chunkOff + i] = s_sym[sg][i];
+        if (lane == 0u) {
+            uint j = uint(nbps - 1 - p);
+            CH.v[cb * 2u * MAX_PLANES + 2u * j] = chunkOff;
+            CH.v[cb * 2u * MAX_PLANES + 2u * j + 1u] = planeCount;
+        }
+        symTotal += planeCount;
+        ++planesCoded;
+        subgroupBarrier();
+        if (stop) break;
+    }
+    if (lane == 0u) {
+        INFO.v[4u * cb] = uint(nbps);
+        INFO.v[4u * cb + 1u] = np;
+        INFO.v[4u * cb + 2u] = planesCoded;  // consumed by t1_mq, which then stores the data offset
+    }
+}

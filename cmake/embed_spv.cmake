@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MIT
+# Embed a SPIR-V binary as a uint32_t array in a C++ header.
+file(READ ${IN} hex HEX)
+string(LENGTH "${hex}" len)
+math(EXPR words "${len} / 8")
+set(out "#pragma once\n#include <cstdint>\nstatic const uint32_t ${NAME}[] = {\n")
+set(i 0)
+while(i LESS len)
+  string(SUBSTRING "${hex}" ${i} 8 w)
+  # SPIR-V is little-endian on disk: reverse byte order
+  string(SUBSTRING "${w}" 0 2 b0)
+  string(SUBSTRING "${w}" 2 2 b1)
+  string(SUBSTRING "${w}" 4 2 b2)
+  string(SUBSTRING "${w}" 6 2 b3)
+  string(APPEND out "0x${b3}${b2}${b1}${b0},")
+  math(EXPR i "${i} + 8")
+  math(EXPR m "${i} % 64")
+  if(m EQUAL 0)
+    string(APPEND out "\n")
+  endif()
+endwhile()
+string(APPEND out "};\nstatic const size_t ${NAME}_size = sizeof(${NAME});\n")
+file(WRITE ${OUT} "${out}")

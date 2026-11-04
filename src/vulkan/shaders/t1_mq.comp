@@ -1,0 +1,160 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// MQ arithmetic coding of the context-modelled symbol streams: one invocation per
+// code-block. Also records the coder state at each pass end and, after the final
+// flush, derives the exact truncation length of every pass.
+#include "common.glsl"
+#extension GL_EXT_control_flow_attributes : require
+#define GAIL_GLSL 1
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint64_t info;      // U32Buf (nbps, passes, dataOffset, dataLen)
+    uint64_t passEnd;   // U32Buf
+    uint64_t passLen;   // U32Buf (output)
+    uint64_t chunks;    // U32Buf
+    uint64_t symbols;   // U8Buf
+    uint64_t outBuf;    // U8Buf
+    uint64_t counters;  // U32Buf: [1] output allocator, [2] error flags
+    uint64_t perm;      // U32Buf: processing order (largest blocks first)
+    uint numCblks;
+    uint outCapacity;
+};
+
+U8Buf g_out;
+uint g_cap;
+bool g_overflow;
+
+void mqPut(uint o, int i, uint v) {
+    if (uint(i) < g_cap) g_out.v[o + uint(i)] = uint8_t(v);
+    else g_overflow = true;
+}
+
+shared uint s_ctx[19][64];  // context states, [context][invocation]: conflict-free
+shared uint s_tab[47];
+
+#define MQ_OUT_T uint
+#define MQ_PUT(o, i, v) mqPut(o, i, v)
+#define MQ_GET(o, i) uint(g_out.v[(o) + uint(i)])
+#define MQ_CTX(e, cx) s_ctx[cx][gl_LocalInvocationIndex]
+#define MQ_TAB(i) s_tab[i]
+#include "kernels/mq_encoder.h"
+
+// mq_encode (kernels/mq_encoder.h) with the context state t passed in and the new state
+// returned, so the caller can prefetch the next symbol's state and keep the shared-memory
+// load out of the per-symbol dependency chain.
+uint mqEncodeT(inout MqEnc e, uint cx, uint t, uint d, uint o) {
+    uint mps = t >> 31, qe = t & 0xFFFFu;
+    uint a = e.A - qe;
+    bool isMps = d == mps;
+    bool renorm = !isMps || (a & 0x8000u) == 0u;
+    bool addC = isMps != (a < qe);
+    e.C += addC ? qe : 0u;
+    e.A = addC ? a : qe;
+    if (renorm) {
+        uint nidx = isMps ? ((t >> 16) & 63u) : ((t >> 22) & 63u);
+        uint nmps = isMps ? mps : (mps ^ ((t >> 28) & 1u));
+        t = s_tab[nidx] | (nmps << 31);
+        s_ctx[cx][gl_LocalInvocationIndex] = t;
+        mq_renorm(e, o);
+    }
+    return t;
+}
+
+void main() {
+    if (gl_LocalInvocationIndex < 47u) s_tab[gl_LocalInvocationIndex] = MQ_TABLE[gl_LocalInvocationIndex];
+    barrier();
+    if (gl_GlobalInvocationID.x >= numCblks) return;
+    uint cb = U32Buf(perm).v[gl_GlobalInvocationID.x];
+    U32Buf INFO = U32Buf(info);
+    U32Buf PE = U32Buf(passEnd);
+    U32Buf PL = U32Buf(passLen);
+    U32Buf CH = U32Buf(chunks);
+    U32Buf CNT = U32Buf(counters);
+    // Symbols did not fit (pathological content): some chunks were never written, and the
+    // host redoes this frame on the CPU
+    if ((CNT.v[2] & 1u) != 0u) return;
+    uint nbps = INFO.v[4u * cb];
+    uint np = INFO.v[4u * cb + 1u];
+    if (np == 0u) {
+        INFO.v[4u * cb + 2u] = 0u;
+        INFO.v[4u * cb + 3u] = 0u;
+        return;
+    }
+    uint total = PE.v[cb * MAX_PASSES + np - 1u];
+    g_cap = (total / 2u + 64u + 3u) & ~3u;
+    uint outBase = atomicAdd(CNT.v[1], g_cap);
+    if (outBase + g_cap > outCapacity) {
+        atomicOr(CNT.v[2], 2u);
+        INFO.v[4u * cb + 1u] = 0u;
+        INFO.v[4u * cb + 3u] = 0u;
+        return;
+    }
+    g_out = U8Buf(outBuf);
+    g_overflow = false;
+
+    // Symbols are read 16 at a time (chunks are 16-byte aligned), one load ahead.
+    U32x4Buf SYV = U32x4Buf(symbols);
+
+    MqEnc e;
+    mq_init(e);
+    MqSnap snaps[MAX_PASSES];
+    uint k = 0u;
+    uint pos = 0u;
+    uint nextEnd = PE.v[cb * MAX_PASSES];  // 0xFFFFFFFF once every pass end is recorded
+    uint planes = INFO.v[4u * cb + 2u];
+    for (uint j = 0u; j < planes; ++j) {
+        uint off = CH.v[cb * 2u * MAX_PLANES + 2u * j];
+        uint cnt = CH.v[cb * 2u * MAX_PLANES + 2u * j + 1u];
+        uvec4 next = cnt > 0u ? SYV.v[off >> 4] : uvec4(0u);
+        for (uint i = 0u; i < cnt; i += 16u) {
+            // Symbols are coded 16 at a time (one chunk, fully unrolled so word and byte
+            // selection are constants), with the next chunk loaded one chunk ahead.
+            uvec4 cur = next;
+            if (i + 16u < cnt) next = SYV.v[(off + i + 16u) >> 4];
+            uint m = min(16u, cnt - i);
+            uint sym = cur.x & 0xFFu;
+            uint t = s_ctx[sym >> 1][gl_LocalInvocationIndex];
+            [[unroll]] for (uint b = 0u; b < 16u; ++b) {
+                if (b >= m) break;
+                uint symNext = b + 1u < 16u ? (cur[(b + 1u) >> 2] >> (8u * ((b + 1u) & 3u))) & 0xFFu : 0u;
+                uint tNext = s_ctx[symNext >> 1][gl_LocalInvocationIndex];  // prefetch
+                if (pos == nextEnd) {
+                    do {
+                        snaps[k] = mq_snapshot(e);
+                        ++k;
+                        nextEnd = k < np ? PE.v[cb * MAX_PASSES + k] : 0xFFFFFFFFu;
+                    } while (nextEnd == pos);
+                }
+                uint cx = sym >> 1;
+                uint tNew = mqEncodeT(e, cx, t, sym & 1u, outBase);
+                t = cx == (symNext >> 1) ? tNew : tNext;
+                sym = symNext;
+                ++pos;
+            }
+        }
+    }
+    if (pos == nextEnd) {
+        do {
+            snaps[k] = mq_snapshot(e);
+            ++k;
+            nextEnd = k < np ? PE.v[cb * MAX_PASSES + k] : 0xFFFFFFFFu;
+        } while (nextEnd == pos);
+    }
+    uint len = mq_flush(e, outBase);
+    if (g_overflow) {
+        atomicOr(CNT.v[2], 2u);
+        INFO.v[4u * cb + 1u] = 0u;
+        INFO.v[4u * cb + 3u] = 0u;
+        return;
+    }
+    uint prev = 1u;
+    for (uint q = 0u; q < np; ++q) {
+        uint L = q == np - 1u ? len : mq_trunc_len(snaps[q], outBase, len, prev);
+        PL.v[cb * MAX_PASSES + q] = L;
+        prev = max(prev, L);
+    }
+    INFO.v[4u * cb + 2u] = outBase;
+    INFO.v[4u * cb + 3u] = len;
+}

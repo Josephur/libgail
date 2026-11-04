@@ -1,0 +1,46 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Exclusive prefix sums (single workgroup) over code-blocks of
+//   x: codeword length rounded to 4 bytes  -> compacted data offsets
+//   y: number of coding passes             -> compacted pass-table offsets
+#include "common.glsl"
+
+layout(local_size_x = 1024) in;
+
+layout(push_constant) uniform PC {
+    uint64_t info;     // U32Buf (passes at 4*cb+1, dataLen at 4*cb+3)
+    uint64_t offsets;  // U32Buf, 2 * (numCblks + 1): data offset, pass offset
+    uint numCblks;
+};
+
+shared uvec2 s_part[1024];
+
+uvec2 item(U32Buf I, uint i) { return uvec2((I.v[4u * i + 3u] + 3u) & ~3u, I.v[4u * i + 1u]); }
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint per = (numCblks + 1023u) / 1024u;
+    uint b = t * per, e = min(b + per, numCblks);
+    U32Buf INFO = U32Buf(info);
+    U32Buf OFF = U32Buf(offsets);
+    uvec2 sum = uvec2(0u);
+    for (uint i = b; i < e; ++i) sum += item(INFO, i);
+    s_part[t] = sum;
+    barrier();
+    for (uint d = 1u; d < 1024u; d <<= 1) {
+        uvec2 v = t >= d ? s_part[t - d] : uvec2(0u);
+        barrier();
+        s_part[t] += v;
+        barrier();
+    }
+    uvec2 run = s_part[t] - sum;
+    for (uint i = b; i < e; ++i) {
+        OFF.v[2u * i] = run.x;
+        OFF.v[2u * i + 1u] = run.y;
+        run += item(INFO, i);
+    }
+    if (t == 1023u) {
+        OFF.v[2u * numCblks] = s_part[1023].x;
+        OFF.v[2u * numCblks + 1u] = s_part[1023].y;
+    }
+}

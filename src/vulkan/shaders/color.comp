@@ -1,0 +1,29 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Interleaved RGB48 -> 12-bit X'Y'Z' -> DC shift -> ICT, one invocation per pixel.
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint64_t rgb;     // U16Buf, interleaved RGB
+    uint64_t lut;     // F32Buf, 65536-entry EOTF (cd/m^2)
+    uint64_t params;  // F32Buf, colour parameters (kernels/color_math.h)
+    uint64_t planes;  // F32Buf, 3 planes of width*height
+    uint64_t xyz;     // U16Buf (optional, 0 = none)
+    uint64_t lut3d;   // F32Buf, optional 3D LUT (size in params)
+    uint numPixels;
+};
+
+#include "color_tail.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= numPixels) return;
+    g_cp = F32Buf(params);
+    g_eotf = F32Buf(lut);
+    g_lut3 = F32Buf(lut3d);
+    U16Buf src = U16Buf(rgb);
+    vec3 c = vec3(float(src.v[3 * i]), float(src.v[3 * i + 1]), float(src.v[3 * i + 2])) / 65535.0;
+    finishPixel(i, c, planes, xyz, numPixels);
+}

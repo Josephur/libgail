@@ -1,0 +1,76 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Vertical 9/7 analysis on 32-column x 64-row tiles. Each tile is loaded with an
+// 8-row symmetric-extension halo into shared memory, the four lifting steps run
+// there (the halo absorbs the +-4 sample dependency), and the interior rows are
+// written de-interleaved (low half / high half) to dst.
+#include "common.glsl"
+
+layout(local_size_x = 32, local_size_y = 8) in;
+
+layout(push_constant) uniform PC {
+    uint64_t src;
+    uint64_t dst;
+    uint stride;
+    uint planeSize;
+    uint w, h;
+};
+
+#define TILE 64
+#define HALO 8
+#define ROWS (TILE + 2 * HALO)
+
+shared float tile[ROWS][33];
+
+const float ALPHA = -1.586134342059924;
+const float BETA = -0.052980118572961;
+const float GAMMA = 0.882911075530934;
+const float DELTA = 0.443506852043971;
+const float K = 1.230174104914001;
+
+int mirror(int i, int n) {
+    int period = 2 * (n - 1);
+    if (i < 0) i = -i;  // GLSL leaves % of negative operands undefined
+    i = i % period;
+    return i < n ? i : period - i;
+}
+
+void main() {
+    uint lx = gl_LocalInvocationID.x, ly = gl_LocalInvocationID.y;
+    uint x = gl_WorkGroupID.x * 32u + lx;
+    int y0 = int(gl_WorkGroupID.y) * TILE;
+    uint comp = gl_WorkGroupID.z;
+    int n = int(h);
+    F32Buf S = F32Buf(src);
+    F32Buf D = F32Buf(dst);
+    uint base = comp * planeSize + x;
+    bool col = x < w;
+    if (n == 1) {
+        if (col && ly == 0u && y0 == 0) D.v[base] = S.v[base];
+        return;
+    }
+    for (int r = int(ly); r < ROWS; r += 8) {
+        int y = mirror(y0 - HALO + r, n);
+        tile[r][lx] = col ? S.v[base + uint(y) * stride] : 0.0;
+    }
+    barrier();
+    // tile row r holds sample y0 - HALO + r; y0 and HALO are even, so parity(r) = parity(sample)
+    for (int step = 0; step < 4; ++step) {
+        int parity = (step & 1) == 0 ? 1 : 0;
+        float c = step == 0 ? ALPHA : (step == 1 ? BETA : (step == 2 ? GAMMA : DELTA));
+        for (int r = parity + 2 * int(ly); r < ROWS - 1; r += 16) {
+            if (r == 0) continue;
+            tile[r][lx] += c * (tile[r - 1][lx] + tile[r + 1][lx]);
+        }
+        barrier();
+    }
+    if (!col) return;
+    uint sn = (h + 1u) / 2u;
+    for (int r = HALO + int(ly); r < HALO + TILE; r += 8) {
+        int y = y0 - HALO + r;
+        if (y >= n) break;
+        float v = tile[r][lx];
+        if ((y & 1) == 0) D.v[base + uint(y / 2) * stride] = v * (1.0 / K);
+        else D.v[base + (sn + uint(y / 2)) * stride] = v * K;
+    }
+}

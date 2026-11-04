@@ -1,0 +1,48 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Order code-blocks for the MQ kernel: largest symbol streams first (longest jobs
+// start earliest) and similar sizes adjacent (warps finish together). A counting
+// sort on a log2 histogram with 4 sub-buckets per octave, in one workgroup.
+#include "common.glsl"
+
+layout(local_size_x = 1024) in;
+
+layout(push_constant) uniform PC {
+    uint64_t info;     // U32Buf (passes at 4*cb+1)
+    uint64_t passEnd;  // U32Buf [cb * MAX_PASSES + k]
+    uint64_t perm;     // U32Buf out: code-block indices
+    uint numCblks;
+};
+
+#define NB 128
+shared uint s_hist[NB];
+
+uint bucketOf(U32Buf I, U32Buf PE, uint cb) {
+    uint np = I.v[4u * cb + 1u];
+    uint n = np == 0u ? 0u : PE.v[cb * MAX_PASSES + np - 1u];
+    if (n < 4u) return NB - 1u;
+    int l = findMSB(n);
+    uint sub = (n >> uint(l - 2)) & 3u;  // two bits below the leading one
+    return NB - 1u - min(uint(l) * 4u + sub, NB - 1u);  // descending size
+}
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    U32Buf I = U32Buf(info);
+    U32Buf PE = U32Buf(passEnd);
+    U32Buf P = U32Buf(perm);
+    if (t < NB) s_hist[t] = 0u;
+    barrier();
+    for (uint i = t; i < numCblks; i += 1024u) atomicAdd(s_hist[bucketOf(I, PE, i)], 1u);
+    barrier();
+    if (t == 0u) {
+        uint run = 0u;
+        for (uint b = 0u; b < NB; ++b) {
+            uint c = s_hist[b];
+            s_hist[b] = run;
+            run += c;
+        }
+    }
+    barrier();
+    for (uint i = t; i < numCblks; i += 1024u) P.v[atomicAdd(s_hist[bucketOf(I, PE, i)], 1u)] = i;
+}

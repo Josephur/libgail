@@ -1,0 +1,78 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Native planar Y'CbCr (4:2:0, 4:2:2 or 4:4:4) -> R'G'B' (bilinear chroma upsampling, range
+// expansion, matrix), or planar G'B'R' -> R'G'B', then the same 12-bit X'Y'Z' / ICT path
+// as color.comp. One invocation per container
+// pixel; pixels outside the active picture are black (letterbox / pillarbox).
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint64_t src;     // U8Buf or U16Buf (planar Y, Cb, Cr)
+    uint64_t lut;
+    uint64_t params;
+    uint64_t planes;
+    uint64_t xyz;
+    uint64_t lut3d;
+    uint numPixels;
+    uint width;
+    uint activeSize;  // activeW | activeH << 16
+    uint offset;      // ox | oy << 16
+    uint fmt;         // bits | fullRange << 8 | chroma << 9 (0 left, 1 center, 2 topleft)
+                      // | sx << 11 | sy << 12 (chroma subsampling) | rgb << 13 (planes G', B', R')
+    float crR, cbG, crG, cbB;
+};
+
+#include "color_tail.glsl"
+
+uint g_bits;
+float sampleAt(uint i) {
+    if (g_bits > 8u) return float(U16Buf(src).v[i]);
+    return float(U8Buf(src).v[i]);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= numPixels) return;
+    g_bits = fmt & 0xFFu;
+    int aw = int(activeSize & 0xFFFFu), ah = int(activeSize >> 16);
+    int x = int(i % width) - int(offset & 0xFFFFu), y = int(i / width) - int(offset >> 16);
+    vec3 rgb = vec3(0.0);
+    if (x >= 0 && y >= 0 && x < aw && y < ah) {
+        int sx = int((fmt >> 11) & 1u), sy = int((fmt >> 12) & 1u);
+        int cw = (aw + sx) >> sx, ch = (ah + sy) >> sy;
+        uint chroma = (fmt >> 9) & 3u;
+        float cxp = sx == 0 ? float(x) : chroma == 1u ? (float(x) - 0.5) * 0.5 : float(x) * 0.5;
+        float cyp = sy == 0 ? float(y) : chroma == 2u ? float(y) * 0.5 : (float(y) - 0.5) * 0.5;
+        cxp = clamp(cxp, 0.0, float(cw - 1));
+        cyp = clamp(cyp, 0.0, float(ch - 1));
+        int x0 = int(cxp), y0 = int(cyp), x1 = min(x0 + 1, cw - 1), y1 = min(y0 + 1, ch - 1);
+        float fx = cxp - float(x0), fy = cyp - float(y0);
+        uint uOff = uint(aw * ah), vOff = uOff + uint(cw * ch);
+        float Yv = sampleAt(uint(y * aw + x));
+        float U = mix(mix(sampleAt(uOff + uint(y0 * cw + x0)), sampleAt(uOff + uint(y0 * cw + x1)), fx),
+                      mix(sampleAt(uOff + uint(y1 * cw + x0)), sampleAt(uOff + uint(y1 * cw + x1)), fx), fy);
+        float V = mix(mix(sampleAt(vOff + uint(y0 * cw + x0)), sampleAt(vOff + uint(y0 * cw + x1)), fx),
+                      mix(sampleAt(vOff + uint(y1 * cw + x0)), sampleAt(vOff + uint(y1 * cw + x1)), fx), fy);
+        float maxv = float((1u << g_bits) - 1u), sc = float(1u << (g_bits - 8u));
+        if (((fmt >> 13) & 1u) != 0u) {  // planes G', B', R'
+            rgb = clamp(vec3(V, Yv, U) / maxv, 0.0, 1.0);
+        } else {
+            if (((fmt >> 8) & 1u) != 0u) {
+                Yv /= maxv;
+                U = (U - 128.0 * sc) / maxv;
+                V = (V - 128.0 * sc) / maxv;
+            } else {
+                Yv = (Yv - 16.0 * sc) / (219.0 * sc);
+                U = (U - 128.0 * sc) / (224.0 * sc);
+                V = (V - 128.0 * sc) / (224.0 * sc);
+            }
+            rgb = clamp(vec3(Yv + crR * V, Yv - cbG * U - crG * V, Yv + cbB * U), 0.0, 1.0);
+        }
+    }
+    g_cp = F32Buf(params);
+    g_eotf = F32Buf(lut);
+    g_lut3 = F32Buf(lut3d);
+    finishPixel(i, rgb, planes, xyz, numPixels);
+}

@@ -1,0 +1,17 @@
+build/
+build-*/
+.venv/
+.cache/
+.claude/
+*.j2c
+*.xyz
+*.mxf
+__pycache__/
+.clangd
+reports/
+test-films/
+test-media/*
+!test-media/README.md
+local/
+AGENTS.md
+CLAUDE.md

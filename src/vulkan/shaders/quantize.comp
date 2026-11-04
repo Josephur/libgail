@@ -1,0 +1,39 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Dead-zone quantisation into code-block-major layout: one invocation per
+// code-block sample (1024 per block, zero padded outside the block).
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint64_t planes;   // F32Buf
+    uint64_t cblkTab;  // U32Buf (4 words per block)
+    uint64_t bandTab;  // U32Buf (4 words per band: invDelta bits, maxMag, distortion scale, -)
+    uint64_t coeffs;   // U32Buf
+    uint numCblks;
+    uint stride;
+    uint planeSize;
+};
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint cb = gid >> 10;
+    if (cb >= numCblks) return;
+    uint k = gid & 1023u;
+    int r = int(k >> 5), x = int(k & 31u);
+    U32Buf T = U32Buf(cblkTab);
+    uint band = T.v[4 * cb];
+    uint ax = T.v[4 * cb + 1], ay = T.v[4 * cb + 2], p = T.v[4 * cb + 3];
+    uint outv = 0u;
+    if (x < CB_W(p) && r < CB_H(p)) {
+        U32Buf B = U32Buf(bandTab);
+        float inv = uintBitsToFloat(B.v[4 * band]);
+        uint maxMag = B.v[4 * band + 1];
+        float v = F32Buf(planes).v[CB_COMP(p) * planeSize + (ay + uint(r)) * stride + ax + uint(x)];
+        float q = abs(v) * inv * 64.0;
+        uint m = q >= float(maxMag) ? maxMag : uint(q);
+        outv = m | ((v < 0.0 && m >= 64u) ? 0x80000000u : 0u);
+    }
+    U32Buf(coeffs).v[gid] = outv;
+}
