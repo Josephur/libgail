@@ -274,9 +274,12 @@ int main(int argc, char** argv) {
                      : es.input.sy                              ? "Y'CbCr 4:2:0 (GPU conversion)"
                      : es.input.sx                              ? "Y'CbCr 4:2:2 (GPU conversion)"
                                                                 : "Y'CbCr 4:4:4 (GPU conversion)");
-        if (!pattern && xyzDir.empty())
-            std::fprintf(stderr, "  source %dx%d %.3f fps, transfer %s, primaries %s, peak %.0f cd/m2\n", info.width,
-                         info.height, info.fps, transferName(cp.transfer), primariesName(cp.primaries), cp.hdrPeak);
+        if (!pattern && xyzDir.empty()) {
+            const bool untagged = info.matrix.empty() || info.matrix == "unknown";
+            std::fprintf(stderr, "  source %dx%d %.3f fps, transfer %s, primaries %s, matrix %s%s, peak %.0f cd/m2\n",
+                         info.width, info.height, info.fps, transferName(cp.transfer), primariesName(cp.primaries),
+                         sourceMatrix(info).c_str(), untagged ? " (assumed: the stream is not tagged)" : "", cp.hdrPeak);
+        }
         std::fprintf(stderr, "  colour: %s\n", ColorConverter(cp).describe().c_str());
         for (size_t d = 0; d < devices.size(); ++d)
             std::fprintf(stderr, "  device %zu: %s\n", d, devices[d]->name().c_str());

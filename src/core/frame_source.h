@@ -25,6 +25,11 @@ struct SourceInfo {
 
 SourceInfo probeSource(const std::string& path);
 
+// The Y'CbCr matrix a source is decoded with, as swscale names it: "bt709", "bt601" or
+// "bt2020". From the stream's colour-space tag; when that is missing, BT.2020 for BT.2020
+// primaries, else BT.709 for HD (720 lines or more) and BT.601 for SD. Both input paths
+// (native planar and RGB48 through swscale) use this one decision.
+std::string sourceMatrix(const SourceInfo& info);
 
 
 struct SourceOptions {

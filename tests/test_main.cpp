@@ -1063,6 +1063,29 @@ static void testFaults() {
     }
 }
 
+// The Y'CbCr matrix both input paths use: the stream's tag, else the HD/SD rule (the RGB path
+// used to leave untagged sources to swscale, which takes BT.601 at any size).
+static void testSourceMatrix() {
+    SourceInfo s;
+    s.width = 1920, s.height = 1080;
+    CHECK(sourceMatrix(s) == "bt709", "untagged HD: %s", sourceMatrix(s).c_str());
+    s.matrix = "unknown";
+    CHECK(sourceMatrix(s) == "bt709", "HD tagged unknown: %s", sourceMatrix(s).c_str());
+    s.height = 576;
+    CHECK(sourceMatrix(s) == "bt601", "untagged SD: %s", sourceMatrix(s).c_str());
+    s.primaries = "bt2020";
+    CHECK(sourceMatrix(s) == "bt2020", "untagged with BT.2020 primaries: %s", sourceMatrix(s).c_str());
+    s.matrix = "smpte170m";
+    CHECK(sourceMatrix(s) == "bt601", "tagged smpte170m: %s", sourceMatrix(s).c_str());
+    s.matrix = "bt470bg";
+    CHECK(sourceMatrix(s) == "bt601", "tagged bt470bg: %s", sourceMatrix(s).c_str());
+    s.matrix = "bt709";
+    s.height = 480;
+    CHECK(sourceMatrix(s) == "bt709", "tagged bt709 at SD: %s", sourceMatrix(s).c_str());
+    s.matrix = "bt2020nc";
+    CHECK(sourceMatrix(s) == "bt2020", "tagged bt2020nc: %s", sourceMatrix(s).c_str());
+}
+
 // Truncated and malformed codestreams must come back as errors from the checker without it
 // reading outside the buffer (each case sits in an exactly sized heap block, so a
 // sanitizer build catches any over-read) or looping.
@@ -1186,6 +1209,7 @@ int main(int argc, char** argv) {
     run("faults", testFaults);
     run("limits", testRateLimits);
     run("checker", testCheckerMalformed);
+    run("matrix", testSourceMatrix);
 #ifdef GAIL_HAVE_VULKAN
     run("gpumem", [] { testGpuMemory(false); });
     run("gpucolor", [] { testGpuColor(false); });

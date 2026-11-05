@@ -124,10 +124,10 @@ public:
                              : starts("yuv444p") || starts("yuva444p")                              ? "yuv444p"
                              : starts("gbrp") || starts("gbrap")                                    ? "gbrp"
                                                                                                     : nullptr;
-        std::string matrix = "auto";
-        if (info.matrix == "bt2020nc" || info.matrix == "bt2020c") matrix = "bt2020";
-        else if (info.matrix == "bt709") matrix = "bt709";
-        else if (info.matrix == "smpte170m" || info.matrix == "bt470bg") matrix = "bt601";
+        // One matrix for both paths. Left to "auto", swscale would take BT.601 for every
+        // untagged source, while the planar path assumes BT.709 for HD: the two paths then
+        // gave different colours for the same clip.
+        const std::string matrix = sourceMatrix(info);
         std::ostringstream vf;
         if (o.fps > 0) vf << "fps=" << o.fps << ",";
         if (o.yuv && planar) {
@@ -150,10 +150,7 @@ public:
             fmt_.fullRange = info.range == "pc";
             if (matrix == "bt709") fmt_.kr = 0.2126, fmt_.kb = 0.0722;
             else if (matrix == "bt601") fmt_.kr = 0.299, fmt_.kb = 0.114;
-            else if (matrix == "bt2020") fmt_.kr = 0.2627, fmt_.kb = 0.0593;
-            else if (info.primaries == "bt2020") fmt_.kr = 0.2627, fmt_.kb = 0.0593;
-            else if (info.height >= 720) fmt_.kr = 0.2126, fmt_.kb = 0.0722;
-            else fmt_.kr = 0.299, fmt_.kb = 0.114;
+            else fmt_.kr = 0.2627, fmt_.kb = 0.0593;  // bt2020
             fmt_.chroma = info.chromaLocation == "center" ? FrameFormat::Chroma::Center
                           : info.chromaLocation == "topleft" ? FrameFormat::Chroma::TopLeft
                                                              : FrameFormat::Chroma::Left;
@@ -330,6 +327,15 @@ SourceInfo probeSource(const std::string& path) {
     if (kv.count("max_luminance")) info.masteringPeak = parseRational(kv["max_luminance"]);
     if (kv.count("max_content")) info.maxCLL = std::atof(kv["max_content"].c_str());
     return info;
+}
+
+std::string sourceMatrix(const SourceInfo& info) {
+    if (info.matrix == "bt2020nc" || info.matrix == "bt2020c") return "bt2020";
+    if (info.matrix == "bt709") return "bt709";
+    if (info.matrix == "smpte170m" || info.matrix == "bt470bg" || info.matrix == "bt601") return "bt601";
+    // untagged: what such material almost always is
+    if (info.primaries == "bt2020") return "bt2020";
+    return info.height >= 720 ? "bt709" : "bt601";
 }
 
 std::unique_ptr<FrameSource> openFfmpegSource(const SourceOptions& o, const SourceInfo& info) {
