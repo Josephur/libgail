@@ -102,6 +102,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
     sum.framesPerDevice.assign(devices.size(), 0);
     sum.slotsPerDevice = made;
     sum.slotsRetired.assign(devices.size(), 0);
+    if (o.onReady) o.onReady();  // every device set-up error has been thrown by now
 
     // Memory pressure during the run: twice a second one of a device's slots asks the driver
     // how much memory is left; when another process has taken so much that less than half

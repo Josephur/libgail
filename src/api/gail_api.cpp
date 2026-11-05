@@ -283,16 +283,19 @@ struct gail_encoder {
     std::condition_variable outCv;
     std::deque<gail_packet> out;
     bool pipelineDone = false;
+    bool ready = false;  // the pipeline has set up its frame slots (PipelineOptions::onReady)
 
     std::mutex errMutex;
     std::atomic<bool> failed{false};
     std::string error;
+    int errorStatus = GAIL_ERROR_FAILED;  // what gail_encoder_create() returns for a failure before `ready`
 
-    void setError(const std::string& msg) {
+    void setError(const std::string& msg, int status = GAIL_ERROR_FAILED) {
         {
             std::lock_guard<std::mutex> l(errMutex);
             if (failed.load()) return;
             error = msg;
+            errorStatus = status;
             failed.store(true);
         }
         log(GAIL_LOG_ERROR, "%s", msg.c_str());
@@ -702,9 +705,18 @@ int gail_encoder_create(const gail_config* c, gail_encoder** encoder) {
         po.onError = [raw] { raw->src->abort(); };
         po.onLog = [raw](const std::string& m) { raw->log(GAIL_LOG_WARNING, "%s", m.c_str()); };
         po.onFrame = [raw](const FrameStats& st, const std::vector<uint8_t>& cs) { raw->deliver(st, cs); };
+        po.onReady = [raw] {
+            std::lock_guard<std::mutex> l(raw->outMutex);
+            raw->ready = true;
+            raw->outCv.notify_all();
+        };
         e->thread = std::thread([raw, es, L, po] {
             try {
                 runPipeline(*raw->src, raw->devices, L, es, po);
+            } catch (const DeviceOutOfMemory& ex) {
+                raw->setError(ex.what(), GAIL_ERROR_NOMEM);  // no device has room for a frame
+            } catch (const std::bad_alloc&) {
+                raw->setError("out of memory", GAIL_ERROR_NOMEM);
             } catch (const std::exception& ex) {
                 raw->setError(ex.what());
             } catch (...) {
@@ -716,6 +728,18 @@ int gail_encoder_create(const gail_config* c, gail_encoder** encoder) {
             raw->pipelineDone = true;
             raw->outCv.notify_all();
         });
+        // The frame slots (device buffers, GPU programs) are set up on that thread: wait
+        // until they are, so a device with no room for a frame (GAIL_ERROR_NOMEM, as the
+        // header promises) or one that fails to set up is reported here, not by the first
+        // frame. With GAIL_BACKEND_AUTO the pipeline falls back to the CPU instead.
+        {
+            std::unique_lock<std::mutex> l(raw->outMutex);
+            raw->outCv.wait(l, [raw] { return raw->ready || raw->pipelineDone; });
+        }
+        if (!raw->ready) {
+            raw->join();  // the thread has finished; this reaps it before `e` is destroyed
+            return fail(raw->errorStatus, raw->error);
+        }
     } catch (const ApiError& ex) {
         return fail(ex.status, ex.what());
     } catch (const std::bad_alloc&) {

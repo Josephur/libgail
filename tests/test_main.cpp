@@ -926,6 +926,9 @@ static void testFaults() {
     po.slotsPerDevice = 2;
     std::vector<std::string> notes;
     po.onLog = [&](const std::string& m) { notes.push_back(m); };
+    // onReady: once per run that got its slots, before any frame, never when set-up failed
+    int ready = 0;
+    long long readyAt = -1;
     auto faulty = [](int failAt, int slots) {
         auto d = std::make_unique<FaultyDevice>();
         d->inner = createCpuDevice(0);
@@ -939,6 +942,7 @@ static void testFaults() {
     // runPipeline() with its outcome as a string: "" when it completed, else the error
     auto attempt = [&](std::vector<std::unique_ptr<Device>>& devs, FrameSource& src, PipelineSummary* sum = nullptr) {
         notes.clear();
+        ready = 0;
         try {
             PipelineSummary s = runPipeline(src, devs, L, es, po);
             if (sum) *sum = s;
@@ -952,6 +956,10 @@ static void testFaults() {
     po.onFrame = [&](const FrameStats& st, const std::vector<uint8_t>& cs) {
         inOrder = inOrder && st.index == delivered && !cs.empty();
         ++delivered;
+    };
+    po.onReady = [&] {
+        ++ready;
+        readyAt = delivered;
     };
 
     // one of two devices dies on its third frame: the run stops with that error, and what was
@@ -977,6 +985,7 @@ static void testFaults() {
         const std::string err = attempt(devs, *src, &sum);
         CHECK(err.empty() && sum.frames == 6 && delivered == 6 && inOrder, "slot refused: error \"%s\", %lld frames",
               err.c_str(), sum.frames);
+        CHECK(ready == 1 && readyAt == 0, "slot refused: onReady called %d times, after %lld frames", ready, readyAt);
         CHECK(sum.slotsPerDevice.size() == 1 && sum.slotsPerDevice[0] == 1 && noted("running with 1 frame(s) in flight"),
               "slot refused: %d frames in flight, %zu notes", sum.slotsPerDevice.empty() ? -1 : sum.slotsPerDevice[0],
               notes.size());
@@ -990,6 +999,7 @@ static void testFaults() {
         po.cpuFallback = false;
         std::string err = attempt(devs, *src);
         CHECK(err.find("no device has memory") != std::string::npos && delivered == 0, "no slot: error \"%s\"", err.c_str());
+        CHECK(ready == 0, "no slot: onReady called %d times although set-up failed", ready);
         po.cpuFallback = true;
         PipelineSummary sum;
         src = openPatternSource(W, H, 4, 3);
@@ -997,6 +1007,7 @@ static void testFaults() {
         CHECK(err.empty() && sum.frames == 4 && devs.size() == 2 && sum.framesPerDevice.size() == 2 &&
                   sum.framesPerDevice[1] == 4 && noted("encoding on the CPU"),
               "no slot, CPU fallback: error \"%s\", %lld frames on %zu devices", err.c_str(), sum.frames, devs.size());
+        CHECK(ready == 1 && readyAt == 0, "CPU fallback: onReady called %d times, after %lld frames", ready, readyAt);
         po.cpuFallback = false;
     }
     // the source fails on its third frame

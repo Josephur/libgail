@@ -57,6 +57,12 @@ struct PipelineOptions {
     // Called once, from the failing thread, as soon as an error stops the pipeline, so a
     // source that blocks in read() (e.g. one fed by an app) can be woken up.
     std::function<void()> onError;
+    // Called once, from the calling thread, when the frames in flight are set up (or the
+    // CPU fallback taken) and the first frame is about to be read. An embedding that runs
+    // the pipeline on its own thread waits for this, so that a device with no room for a
+    // frame, or one that fails to set up, is reported by its create call and not by the
+    // first frame. Not called when set-up fails: the error leaves runPipeline() instead.
+    std::function<void()> onReady;
     // Set by another thread to stop early: frames not yet written are dropped, and only
     // the device work already under way is waited for.
     const std::atomic<bool>* cancel = nullptr;
