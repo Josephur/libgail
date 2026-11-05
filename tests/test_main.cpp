@@ -1091,7 +1091,8 @@ static void testSourceErrors() {
     } catch (const std::exception& e) {
         err = e.what();
     }
-    CHECK(err.find("b.xyz") != std::string::npos && err.find("1000") != std::string::npos, "short .xyz frame: \"%s\"", err.c_str());
+    CHECK(err.find("b.xyz") != std::string::npos && err.find("500 samples") != std::string::npos, "short .xyz frame: \"%s\"",
+          err.c_str());  // 1000 bytes are 500 samples
     fs::remove_all(dir);
 
     // ffmpeg itself failing (here: an input that does not exist) must surface, not look like
