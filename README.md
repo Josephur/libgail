@@ -14,7 +14,7 @@ verified by an independent checker.
   CUDA (optional, fastest on NVIDIA; Turing / GTX 16 and newer with driver 580+), CPU
   (reference, bit-exact with both GPU backends).
 * **Multi-GPU:** every GPU runs several frames in flight; a pull scheduler hands frames to
-  whichever device is free, so mixed GPUs (here an RTX 5060 Ti + RTX 3090) are used fully.
+  whichever device is free, so mixed GPUs are used fully.
   Frames in flight are sized to the device memory that is free (a 4K frame takes ~0.7 GB),
   leaving headroom for other programs on the GPU, and are given up while encoding when
   those programs need the memory back (see [docs/DESIGN.md](docs/DESIGN.md)).
@@ -34,7 +34,9 @@ verified by an independent checker.
   ([integrations/ffmpeg](integrations/ffmpeg/README.md)), up to 17× faster than FFmpeg's
   OpenJPEG encoder at 4K, with output that is actually DCI-compliant.
 
-## Results (this machine: RTX 5060 Ti 16 GB + RTX 3090 24 GB, AMD Ryzen 9 5900X 12-core / 24-thread CPU)
+## Results
+
+*Test system: AMD Ryzen 9 5900X (12 cores / 24 threads), NVIDIA RTX 3090 24 GB + RTX 5060 Ti 16 GB, driver 615.78, CUDA 13.4.*
 
 Real 4K HDR (PQ, BT.2020, 2000 cd/m²) H.264 footage, encoded at 230 Mbit/s, 24 fps.
 Encoder throughput with frames preloaded (`gail-bench`), frames per second:
