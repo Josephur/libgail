@@ -64,6 +64,10 @@ property verified), OpenJPEG and FFmpeg decoders (agree to 90 dB; PSNR mean 55.9
 DCP (no notes; "every frame safely under 250 Mbit/s") and DCP-o-matic's verifier
 (0 errors, 0 Bv2.1 errors, 0 warnings).
 
+Playback of GAIL-encoded 4K DCPs has been tested on Christie Solaria One, CP2210 and CP2220
+and NEC NC900C-A projectors, a GDC SR-1000 media block and ScreenWriter Plus 2.7.5-1983
+([details](docs/VALIDATION.md#playback-on-cinema-hardware)).
+
 ## Build
 
 Requirements: CMake ≥ 3.20, a C++20 compiler, Vulkan SDK headers + `glslc`, FFmpeg

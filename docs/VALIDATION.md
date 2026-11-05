@@ -93,9 +93,24 @@ Identical X'Y'Z' frames (nine spread across the clip at each resolution), OpenJP
   GAIL never does.
 * OpenJPEG: 1.5 fps (4K) / 5.3 fps (2K) on 24 CPU threads; GAIL: 183 / 407 fps on two GPUs.
 
+## Playback on cinema hardware
+
+4K DCPs containing GAIL-encoded picture (SMPTE, 230 Mbit/s, with audio) have been played
+back on the following equipment:
+
+| Kind | Tested |
+|---|---|
+| Projectors | Christie Solaria One, Christie CP2210, Christie CP2220, NEC NC900C-A |
+| Theatre management system (LMS) | ScreenWriter Plus 2.7.5-1983 |
+| Integrated media block (IMB) | GDC SR-1000 |
+
+This is a list of equipment that has been tried, not a certification: it does not cover
+every server, firmware version or content type. Reports from other systems, working or not,
+are welcome.
+
 ## Not verified here
 
-Playback on a physical DCI server/projector was not available. Compatibility evidence
-consists of the standards checks above, two independent decoders, libdcp's `dcpverify`
-and DCP-o-matic's verification. The DCP-o-matic check runs its verification call through a
+Other servers and projectors than those above. Compatibility evidence otherwise consists of
+the standards checks above, two independent decoders, libdcp's `dcpverify` and
+DCP-o-matic's verification. The DCP-o-matic check runs its verification call through a
 headless harness rather than clicking through the GUI.
