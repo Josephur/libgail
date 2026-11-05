@@ -1052,6 +1052,56 @@ static void testFaults() {
     }
 }
 
+// Truncated and malformed codestreams must come back as errors from the checker without it
+// reading outside the buffer (each case sits in an exactly sized heap block, so a
+// sanitizer build catches any over-read) or looping.
+static void testCheckerMalformed() {
+    // SOC + SIZ (2K flat, three 12-bit components): the valid start every case shares
+    std::vector<uint8_t> head = {0xFF, 0x4F, 0xFF, 0x51, 0, 47, 0, 3};
+    for (uint32_t v : {1998u, 1080u, 0u, 0u, 1998u, 1080u, 0u, 0u})
+        for (int s = 24; s >= 0; s -= 8) head.push_back((uint8_t)(v >> s));
+    head.insert(head.end(), {0, 3, 11, 1, 1, 11, 1, 1, 11, 1, 1});
+    struct Case {
+        const char* name;
+        std::vector<uint8_t> tail;
+        const char* expect;  // part of an error message
+    };
+    const Case cases[] = {
+        {"COM truncated after Lcom", {0xFF, 0x64, 0x00, 0xC8}, "runs past the end"},
+        {"COM claiming 200 bytes", {0xFF, 0x64, 0x00, 0xC8, 0, 1, 'x', 'y'}, "runs past the end"},
+        {"COD with Lcod 0", {0xFF, 0x52, 0, 0, 0, 0, 0, 0}, "runs past the end"},
+        {"QCD with Lqcd 1", {0xFF, 0x5C, 0, 1, 0, 0}, "runs past the end"},
+        {"TLM with Ltlm 0", {0xFF, 0x55, 0, 0, 0, 0}, "runs past the end"},
+        {"POC past the end", {0xFF, 0x5F, 0, 16, 0, 0}, "runs past the end"},
+        {"SOT past the end", {0xFF, 0x90, 0, 10, 0, 0, 0, 0, 1, 0, 0, 3, 0xFF, 0x93}, "invalid Psot"},
+        {"nothing after SIZ", {}, "missing EOC"},
+    };
+    auto check = [&](const char* name, const std::vector<uint8_t>& v, const char* expect) {
+        std::unique_ptr<uint8_t[]> buf(new uint8_t[v.size() + 1]);  // +1: a zero-length block is not portable
+        std::copy(v.begin(), v.end(), buf.get());
+        const CheckReport rep = checkDciCodestream(buf.get(), v.size(), 24);
+        const bool found = std::any_of(rep.errors.begin(), rep.errors.end(),
+                                       [&](const std::string& e) { return e.find(expect) != std::string::npos; });
+        CHECK(!rep.ok && found, "%s: ok %d, errors: %s", name, (int)rep.ok, formatReport(rep, false).c_str());
+    };
+    for (const Case& c : cases) {
+        std::vector<uint8_t> v = head;
+        v.insert(v.end(), c.tail.begin(), c.tail.end());
+        check(c.name, v, c.expect);
+    }
+    check("empty buffer", {}, "SOC");
+    // every prefix of a header with a COM and a TLM
+    std::vector<uint8_t> full = head;
+    full.insert(full.end(), {0xFF, 0x64, 0, 8, 0, 1, 'G', 'A', 'I', 'L', 0xFF, 0x55, 0, 19, 0, 0x50});
+    for (int i = 0; i < 3; ++i) full.insert(full.end(), {0, 0, 0, 0, 0});
+    for (size_t n = 1; n < full.size(); ++n) {
+        std::unique_ptr<uint8_t[]> buf(new uint8_t[n]);
+        std::copy(full.begin(), full.begin() + n, buf.get());
+        CHECK(!checkDciCodestream(buf.get(), n, 24).ok, "prefix of %zu bytes passed", n);
+    }
+    std::printf("  %zu malformed cases and %zu prefixes rejected\n", sizeof cases / sizeof cases[0] + 1, full.size() - 1);
+}
+
 // Frame budgets the codestream headers alone cannot meet: dciLimits() must not wrap around,
 // allocateRate() must still return (with every pass dropped), and the pipeline must refuse
 // the budget up front instead of producing frames that fail the DCI check.
@@ -1124,6 +1174,7 @@ int main(int argc, char** argv) {
     run("cpus", testCpuCount);
     run("faults", testFaults);
     run("limits", testRateLimits);
+    run("checker", testCheckerMalformed);
 #ifdef GAIL_HAVE_VULKAN
     run("gpumem", [] { testGpuMemory(false); });
     run("gpucolor", [] { testGpuColor(false); });
