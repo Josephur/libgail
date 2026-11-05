@@ -72,6 +72,11 @@ and NEC NC900C-A projectors, a GDC SR-1000 media block and ScreenWriter Plus 2.7
 
 ## Build
 
+Prebuilt archives of every release (Linux x86_64, Windows x64 built with MSVC and with
+MinGW-w64, macOS arm64), each holding the library, header, `gail.pc` and the tools, with a
+`SHA256SUMS` file, are on the [releases page](https://github.com/Josephur/libgail/releases);
+[CHANGELOG.md](CHANGELOG.md) lists what changed in each. To build from source:
+
 Requirements: CMake ≥ 3.20, a C++20 compiler, Vulkan SDK headers + `glslc`, FFmpeg
 (`ffmpeg`, `ffprobe`) at run time. Optional: CUDA 12+ (enables the CUDA backend).
 
@@ -158,6 +163,7 @@ independent decoders and verifiers, is in [docs/VALIDATION.md](docs/VALIDATION.m
 * [integrations/ffmpeg](integrations/ffmpeg/README.md) — building FFmpeg with the `libgail` encoder
 * [docs/VALIDATION.md](docs/VALIDATION.md) — how compliance is verified, results
 * [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — per-stage timings and scaling
+* [CHANGELOG.md](CHANGELOG.md) — what changed in each release
 
 Audio is out of scope (handled by a separate encoder).
 
