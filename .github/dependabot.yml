@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+# Keeps the GitHub Actions used by ci.yml current: Dependabot opens one pull request per
+# action whose major version is stale (for example actions/checkout@v4, which still
+# targets Node 20 and makes every CI run print a deprecation warning). The pinned tool
+# versions in ci.yml (CUDA, the Vulkan SDK, FFmpeg) are not managed here; those are
+# chosen by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "CI"
