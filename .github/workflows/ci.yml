@@ -6,6 +6,8 @@
 #   macos          Apple clang, CPU backend only, tests, install + pkg-config consumer
 #   ffmpeg         FFmpeg built with the libgail encoder, encoding a test pattern
 #   release-tag    on v* tags only: the tag must match the version in gail.h
+#   release        on v* tags only, after everything else passes: packages the four builds as archives
+#                  with SHA256SUMS and attaches them to a DRAFT GitHub release for review
 # GitHub's runners have no GPU: the CUDA and Vulkan backends are compiled everywhere, the
 # tests run on the CPU backend (GPU tests skip themselves).
 name: CI
@@ -256,3 +258,29 @@ jobs:
           "$ff" -hide_banner -f lavfi -i testsrc2=size=1920x1080:rate=24 -frames:v 4 \
             -pix_fmt yuv420p10le -c:v libgail -f image2 j2c/%03d.j2c
           ./build/gail-check j2c/*.j2c
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-tag, linux, windows-msvc, windows-mingw, macos, ffmpeg]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: libgail-*
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Package
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          python3 scripts/package_release.py "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/release" "$GITHUB_REF_NAME"
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes \
+            --title "GAIL ${GITHUB_REF_NAME#v}" "$RUNNER_TEMP"/release/*
