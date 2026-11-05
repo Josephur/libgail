@@ -50,6 +50,10 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    if (!(mbps > 0) || mbps > 250 || !(fps > 0)) {  // also catches NaN; a zero budget would switch the rate control off
+        std::fprintf(stderr, "--mbps must be in (0, 250] and --fps positive\n");
+        return 2;
+    }
     try {
         const Profile prof = profileStr == "2k" ? Profile::Cinema2K : Profile::Cinema4K;
         int W, H;

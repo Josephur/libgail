@@ -9,10 +9,17 @@
 namespace gail {
 
 RateLimits dciLimits(double fps, double maxMbps, double compMbps) {
+    // Stay strictly below the limits (libdcp flags size > rint(Mbps*1e6/(8*fps))). A budget
+    // smaller than that margin, or a non-positive rate or frame rate, gives 0 rather than
+    // wrapping the size_t around (which would switch the limit off): such a budget cannot be
+    // met, and the callers compare it with emptyCodestreamBytes() before encoding.
+    auto budget = [fps](double mbps) {
+        const double b = std::floor(mbps * 1e6 / (8.0 * fps)) - 16;
+        return b > 0 ? (size_t)b : (size_t)0;  // also 0 for NaN
+    };
     RateLimits l;
-    // Stay strictly below the limits (libdcp flags size > rint(Mbps*1e6/(8*fps))).
-    l.maxTotal = (size_t)std::floor(maxMbps * 1e6 / (8.0 * fps)) - 16;
-    l.maxComp = (size_t)std::floor(compMbps * 1e6 / (8.0 * fps)) - 16;
+    l.maxTotal = budget(maxMbps);
+    l.maxComp = budget(compMbps);
     return l;
 }
 
@@ -222,9 +229,12 @@ RateResult allocateRate(const FrameLayout& L, const Tier1Frame& t1, const RateLi
             if (sz.total <= lim.maxTotal && sz.total + lim.maxTotal / 500 >= lim.maxTotal) break;
             calibrate(lam, sz);
         }
-        // guarantee: nudge upwards until the exact size fits
-        while (sz.total > lim.maxTotal) {
-            for (double& l : lam) l *= 1.002;
+        // guarantee: nudge upwards until the exact size fits. Past the steepest finite slope
+        // every pass that a threshold can drop is gone and the size cannot shrink any
+        // further, so stop there instead of spinning (the frame budget is then below the
+        // header size, which the callers rule out with emptyCodestreamBytes()).
+        while (sz.total > lim.maxTotal && lam[0] <= maxSlope) {
+            for (double& l : lam) l = l > 0 ? l * 1.002 : minSlope;
             sz = measure(lam);
         }
     }
@@ -248,8 +258,8 @@ RateResult allocateRate(const FrameLayout& L, const Tier1Frame& t1, const RateLi
             if (sz.comp[c] <= lim.maxComp && sz.comp[c] + lim.maxComp / 500 >= lim.maxComp) break;
             calibrate(lam, sz);
         }
-        while (sz.comp[c] > lim.maxComp) {
-            lam[c] *= 1.002;
+        while (sz.comp[c] > lim.maxComp && lam[c] <= maxSlope) {  // see above
+            lam[c] = lam[c] > 0 ? lam[c] * 1.002 : minSlope;
             sz = measure(lam);
         }
     }

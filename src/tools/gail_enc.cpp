@@ -195,6 +195,10 @@ int main(int argc, char** argv) {
         std::cerr << "--mbps above 250 would violate the DCI bitrate limit\n";
         return 2;
     }
+    if (!(mbps > 0) || !(fps > 0)) {  // also catches NaN; a zero budget would switch the rate control off
+        std::cerr << "--mbps and --fps must be positive\n";
+        return 2;
+    }
 
     try {
         SourceInfo info;

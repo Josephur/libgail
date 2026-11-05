@@ -1052,6 +1052,57 @@ static void testFaults() {
     }
 }
 
+// Frame budgets the codestream headers alone cannot meet: dciLimits() must not wrap around,
+// allocateRate() must still return (with every pass dropped), and the pipeline must refuse
+// the budget up front instead of producing frames that fail the DCI check.
+static void testRateLimits() {
+    const RateLimits dci = dciLimits(24, 230);
+    CHECK(dci.maxTotal == 1197900 && dci.maxComp == 1041650, "DCI limits at 24 fps: %zu / %zu", dci.maxTotal, dci.maxComp);
+    CHECK(dciLimits(24, 0.0001).maxTotal == 0 && dciLimits(24, 230, 0.0001).maxComp == 0, "a tiny budget wrapped around");
+    CHECK(dciLimits(0, 230).maxTotal == 0 && dciLimits(24, 0).maxTotal == 0, "a zero rate or frame rate wrapped around");
+
+    const int W = 1998, H = 1080;
+    const FrameLayout L = makeLayout(W, H, Profile::Cinema2K, 1.0);
+    const size_t headers = emptyCodestreamBytes(L);
+    // 3 tile-parts and one byte per packet, a few hundred bytes in all
+    CHECK(headers > 100 && headers < 2000, "empty 2K codestream is %zu bytes", headers);
+    auto src = openPatternSource(W, H, 1, 3);
+    std::vector<uint16_t> rgb((size_t)W * H * 3);
+    src->read(rgb.data());
+    EncodeSettings es;
+    es.width = W;
+    es.height = H;
+    es.input = src->format();
+    Tier1Frame t1;
+    createCpuDevice(0)->createSlot(L, es)->encode(rgb.data(), t1);
+    // no budget at all: everything is dropped and the call comes back
+    const RateResult rr = allocateRate(L, t1, RateLimits{0, 0});
+    const bool none = std::all_of(rr.passes.begin(), rr.passes.end(), [](uint8_t p) { return p == 0; });
+    CHECK(none && rr.sizes.total == headers, "zero budget: passes left %d, %zu bytes", !none, rr.sizes.total);
+    // exactly the header size is met
+    const RateResult rh = allocateRate(L, t1, RateLimits{headers, headers});
+    CHECK(rh.sizes.total <= headers, "header-sized budget: %zu bytes", rh.sizes.total);
+    std::printf("  2K headers %zu bytes; zero and header-sized budgets handled\n", headers);
+
+    // the pipeline refuses a budget below the headers before encoding anything
+    std::vector<std::unique_ptr<Device>> devs;
+    devs.push_back(createCpuDevice(0));
+    PipelineOptions po;
+    po.check = false;
+    po.fps = 24;
+    po.limits = RateLimits{headers - 1, headers - 1};
+    int frames = 0;
+    po.onFrame = [&](const FrameStats&, const std::vector<uint8_t>&) { ++frames; };
+    std::string err;
+    try {
+        runPipeline(*openPatternSource(W, H, 2, 3), devs, L, es, po);
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    CHECK(err.find("headers") != std::string::npos && frames == 0, "budget below the headers: \"%s\", %d frames", err.c_str(),
+          frames);
+}
+
 int main(int argc, char** argv) {
     std::string only = argc > 1 ? argv[1] : "";
     auto run = [&](const char* name, const std::function<void()>& fn) {
@@ -1072,6 +1123,7 @@ int main(int argc, char** argv) {
     run("fit", testFitSlots);
     run("cpus", testCpuCount);
     run("faults", testFaults);
+    run("limits", testRateLimits);
 #ifdef GAIL_HAVE_VULKAN
     run("gpumem", [] { testGpuMemory(false); });
     run("gpucolor", [] { testGpuColor(false); });

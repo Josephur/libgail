@@ -610,6 +610,14 @@ int main(void) {
           "max_mbps 300 accepted");
     printf("  rejected as expected: %s\n", gail_last_error());
     gail_config_defaults(&cfg);
+    cfg.max_mbps = 0.05; /* 260 bytes per frame: less than the codestream headers; used to hang the first encode */
+    CHECK(gail_encoder_create(&cfg, &e) == GAIL_ERROR_INVALID && !e && strstr(gail_last_error(), "headers"),
+          "bitrate below the header size accepted: %s", gail_last_error());
+    printf("  rejected as expected: %s\n", gail_last_error());
+    gail_config_defaults(&cfg);
+    cfg.max_mbps = 0.0001; /* a budget under the 16-byte margin used to wrap around and switch the limit off */
+    CHECK(gail_encoder_create(&cfg, &e) == GAIL_ERROR_INVALID && !e, "bitrate below the safety margin accepted");
+    gail_config_defaults(&cfg);
     cfg.input.width = 2048; /* wider than flat 2K */
     CHECK(gail_encoder_create(&cfg, &e) == GAIL_ERROR_INVALID && !e, "oversized picture accepted");
     printf("  rejected as expected: %s\n", gail_last_error());

@@ -29,6 +29,7 @@
 #include "core/frame_input.h"
 #include "core/layout.h"
 #include "core/pipeline.h"
+#include "core/t2.h"
 
 namespace {
 
@@ -678,6 +679,17 @@ int gail_encoder_create(const gail_config* c, gail_encoder** encoder) {
         PipelineOptions po;
         po.fps = fps;
         po.limits = dciLimits(fps, cfg.max_mbps);
+        // The headers alone (main header, tile-parts, empty packets) set a floor on the
+        // frame size; a budget below it could never be met and would hang the rate control.
+        const size_t headerBytes = emptyCodestreamBytes(L);
+        if (po.limits.maxTotal < headerBytes) {
+            char msg[256];
+            std::snprintf(msg, sizeof msg,
+                          "max_mbps %.4g at %.4g fps%s leaves %zu bytes per frame, but the codestream headers alone take "
+                          "%zu bytes: raise max_mbps or lower fps",
+                          cfg.max_mbps, fps, cfg.stereo ? " (per eye)" : "", po.limits.maxTotal, headerBytes);
+            throw ApiError(GAIL_ERROR_INVALID, msg);
+        }
         po.slotsPerDevice = cfg.frames_in_flight > 0 ? cfg.frames_in_flight : (chosen == "cpu" ? kCpuSlots : 3);
         po.deviceMemoryLimit = cfg.max_device_memory;
         po.cpuFallback = cfg.backend == GAIL_BACKEND_AUTO;
