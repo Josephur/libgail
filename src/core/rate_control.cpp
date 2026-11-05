@@ -15,7 +15,9 @@ RateLimits dciLimits(double fps, double maxMbps, double compMbps) {
     // met, and the callers compare it with emptyCodestreamBytes() before encoding.
     auto budget = [fps](double mbps) {
         const double b = std::floor(mbps * 1e6 / (8.0 * fps)) - 16;
-        return b > 0 ? (size_t)b : (size_t)0;  // also 0 for NaN
+        // 0 for NaN and for the infinity a zero frame rate gives (converting that to an
+        // integer is undefined: x86 and arm64 disagree on it)
+        return std::isfinite(b) && b > 0 ? (size_t)b : (size_t)0;
     };
     RateLimits l;
     l.maxTotal = budget(maxMbps);
