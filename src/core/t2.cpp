@@ -387,4 +387,15 @@ void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* 
     if (sizes) *sizes = sz;
 }
 
+size_t emptyCodestreamBytes(const FrameLayout& L) {
+    // A Tier-1 result with no passes anywhere: the packet writer never touches the (empty)
+    // pass tables or data, it only writes the empty-packet bytes.
+    Tier1Frame t1;
+    t1.info.assign((size_t)L.numCblks(), CblkInfo{});
+    const std::vector<uint8_t> passes((size_t)L.numCblks(), 0);
+    CodestreamSizes sz;
+    buildCodestream(L, t1, passes.data(), nullptr, &sz);
+    return sz.total;
+}
+
 }  // namespace gail

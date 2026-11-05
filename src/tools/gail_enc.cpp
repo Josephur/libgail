@@ -195,6 +195,10 @@ int main(int argc, char** argv) {
         std::cerr << "--mbps above 250 would violate the DCI bitrate limit\n";
         return 2;
     }
+    if (!(mbps > 0) || !(fps > 0)) {  // also catches NaN; a zero budget would switch the rate control off
+        std::cerr << "--mbps and --fps must be positive\n";
+        return 2;
+    }
 
     try {
         SourceInfo info;
@@ -270,9 +274,12 @@ int main(int argc, char** argv) {
                      : es.input.sy                              ? "Y'CbCr 4:2:0 (GPU conversion)"
                      : es.input.sx                              ? "Y'CbCr 4:2:2 (GPU conversion)"
                                                                 : "Y'CbCr 4:4:4 (GPU conversion)");
-        if (!pattern && xyzDir.empty())
-            std::fprintf(stderr, "  source %dx%d %.3f fps, transfer %s, primaries %s, peak %.0f cd/m2\n", info.width,
-                         info.height, info.fps, transferName(cp.transfer), primariesName(cp.primaries), cp.hdrPeak);
+        if (!pattern && xyzDir.empty()) {
+            const bool untagged = info.matrix.empty() || info.matrix == "unknown";
+            std::fprintf(stderr, "  source %dx%d %.3f fps, transfer %s, primaries %s, matrix %s%s, peak %.0f cd/m2\n",
+                         info.width, info.height, info.fps, transferName(cp.transfer), primariesName(cp.primaries),
+                         sourceMatrix(info).c_str(), untagged ? " (assumed: the stream is not tagged)" : "", cp.hdrPeak);
+        }
         std::fprintf(stderr, "  colour: %s\n", ColorConverter(cp).describe().c_str());
         for (size_t d = 0; d < devices.size(); ++d)
             std::fprintf(stderr, "  device %zu: %s\n", d, devices[d]->name().c_str());
@@ -312,6 +319,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "  device %zu: %lld frames (%d in flight%s)\n", d, sum.framesPerDevice[d],
                          sum.slotsPerDevice[d],
                          sum.slotsRetired[d] ? (", " + std::to_string(sum.slotsRetired[d]) + " given up").c_str() : "");
+        if (sum.frames == 0) {  // a source that produced nothing is a failed job, not an empty success
+            std::fprintf(stderr, "error: no frames were encoded\n");
+            return 1;
+        }
         return sum.nonCompliant ? 1 : 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

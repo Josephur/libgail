@@ -31,20 +31,24 @@ struct Child {
     pid_t pid = -1;
 #endif
     // Closes the pipe and reaps the process; `stop` ends it first if it is still running.
-    void close(bool stop) {
+    // Returns the child's exit status: 0 when it finished normally, its code otherwise, or
+    // -1 when it was stopped or the status is unknown.
+    int close(bool stop) {
+        int status = -1;
 #if defined(_WIN32)
         (void)stop;  // the child gets a broken pipe and exits
-        if (f) _pclose(f);
+        if (f) status = _pclose(f);
 #else
         if (f) fclose(f);
         if (pid > 0) {
             if (stop) kill(pid, SIGTERM);
-            int st;
-            waitpid(pid, &st, 0);
+            int st = 0;
+            if (waitpid(pid, &st, 0) == pid && !stop) status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
         }
         pid = -1;
 #endif
         f = nullptr;
+        return status;
     }
 };
 
@@ -106,7 +110,7 @@ double parseRational(const std::string& s) {
 
 class FfmpegSource : public FrameSource {
 public:
-    FfmpegSource(const SourceOptions& o, const SourceInfo& info) {
+    FfmpegSource(const SourceOptions& o, const SourceInfo& info) : path_(o.path) {
         const int W = o.width, H = o.height;
         int sw = W, sh = H;
         if (o.fitToContainer && info.width > 0 && info.height > 0) {
@@ -124,10 +128,10 @@ public:
                              : starts("yuv444p") || starts("yuva444p")                              ? "yuv444p"
                              : starts("gbrp") || starts("gbrap")                                    ? "gbrp"
                                                                                                     : nullptr;
-        std::string matrix = "auto";
-        if (info.matrix == "bt2020nc" || info.matrix == "bt2020c") matrix = "bt2020";
-        else if (info.matrix == "bt709") matrix = "bt709";
-        else if (info.matrix == "smpte170m" || info.matrix == "bt470bg") matrix = "bt601";
+        // One matrix for both paths. Left to "auto", swscale would take BT.601 for every
+        // untagged source, while the planar path assumes BT.709 for HD: the two paths then
+        // gave different colours for the same clip.
+        const std::string matrix = sourceMatrix(info);
         std::ostringstream vf;
         if (o.fps > 0) vf << "fps=" << o.fps << ",";
         if (o.yuv && planar) {
@@ -150,10 +154,7 @@ public:
             fmt_.fullRange = info.range == "pc";
             if (matrix == "bt709") fmt_.kr = 0.2126, fmt_.kb = 0.0722;
             else if (matrix == "bt601") fmt_.kr = 0.299, fmt_.kb = 0.114;
-            else if (matrix == "bt2020") fmt_.kr = 0.2627, fmt_.kb = 0.0593;
-            else if (info.primaries == "bt2020") fmt_.kr = 0.2627, fmt_.kb = 0.0593;
-            else if (info.height >= 720) fmt_.kr = 0.2126, fmt_.kb = 0.0722;
-            else fmt_.kr = 0.299, fmt_.kb = 0.114;
+            else fmt_.kr = 0.2627, fmt_.kb = 0.0593;  // bt2020
             fmt_.chroma = info.chromaLocation == "center" ? FrameFormat::Chroma::Center
                           : info.chromaLocation == "topleft" ? FrameFormat::Chroma::TopLeft
                                                              : FrameFormat::Chroma::Left;
@@ -178,12 +179,29 @@ public:
         args.insert(args.end(), {"-vf", vf.str(), "-f", "rawvideo", "-"});
         child_ = spawnRead(args);
     }
-    ~FfmpegSource() override { child_.close(true); }
+    ~FfmpegSource() override {
+        if (child_.f) child_.close(true);
+    }
     const FrameFormat& format() const override { return fmt_; }
-    bool read(void* dst) override { return fread(dst, 1, fmt_.bytes(), child_.f) == fmt_.bytes(); }
+    // End of stream only when FFmpeg finished cleanly: a child that failed (bad input, a
+    // filter it lacks, a decode error) or a partial frame is an error, not a short clip.
+    bool read(void* dst) override {
+        if (!child_.f) return false;
+        const size_t got = fread(dst, 1, fmt_.bytes(), child_.f);
+        if (got == fmt_.bytes()) return true;
+        const int status = child_.close(false);
+        if (status != 0)
+            throw std::runtime_error("ffmpeg failed while decoding " + path_ + " (exit status " + std::to_string(status) +
+                                     "); see its messages above");
+        if (got != 0)
+            throw std::runtime_error("ffmpeg delivered a partial frame of " + path_ + " (" + std::to_string(got) + " of " +
+                                     std::to_string(fmt_.bytes()) + " bytes)");
+        return false;
+    }
 
 private:
     FrameFormat fmt_;
+    std::string path_;
     Child child_;
 };
 
@@ -273,15 +291,21 @@ public:
     const FrameFormat& format() const override { return fmt_; }
     bool read(void* dst) override {
         if (next_ >= files_.size()) return false;
-        FILE* f = fopen(files_[next_++].c_str(), "rb");
-        if (!f) return false;
+        // A file that cannot be read is an error, not the end of the sequence: silently
+        // stopping there would drop it and every frame after it.
+        const std::string& path = files_[next_++];
+        FILE* f = fopen(path.c_str(), "rb");
+        if (!f) throw std::runtime_error("cannot open " + path);
         uint16_t* p = (uint16_t*)dst;
         const size_t n = (size_t)fmt_.width * fmt_.height * 3;
-        const bool ok = fread(p, 2, n, f) == n;
+        const size_t got = fread(p, 2, n, f);
         fclose(f);
+        if (got != n)
+            throw std::runtime_error(path + " holds " + std::to_string(got) + " samples, not the " + std::to_string(n) +
+                                     " of a " + std::to_string(fmt_.width) + "x" + std::to_string(fmt_.height) + " frame");
         // 12-bit code -> 16-bit signal value; the gamma26/xyz colour path maps it back exactly
         for (size_t i = 0; i < n; ++i) p[i] = (uint16_t)((p[i] * 65535u + 2047u) / 4095u);
-        return ok;
+        return true;
     }
 
 private:
@@ -330,6 +354,15 @@ SourceInfo probeSource(const std::string& path) {
     if (kv.count("max_luminance")) info.masteringPeak = parseRational(kv["max_luminance"]);
     if (kv.count("max_content")) info.maxCLL = std::atof(kv["max_content"].c_str());
     return info;
+}
+
+std::string sourceMatrix(const SourceInfo& info) {
+    if (info.matrix == "bt2020nc" || info.matrix == "bt2020c") return "bt2020";
+    if (info.matrix == "bt709") return "bt709";
+    if (info.matrix == "smpte170m" || info.matrix == "bt470bg" || info.matrix == "bt601") return "bt601";
+    // untagged: what such material almost always is
+    if (info.primaries == "bt2020") return "bt2020";
+    return info.height >= 720 ? "bt709" : "bt601";
 }
 
 std::unique_ptr<FrameSource> openFfmpegSource(const SourceOptions& o, const SourceInfo& info) {

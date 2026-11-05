@@ -82,6 +82,19 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
     const double maxFrame = std::rint(250e6 / (8 * fps)), riskyFrame = std::rint(230e6 / (8 * fps));
     const double maxTP = std::floor(200e6 / (8 * fps));
 
+    // End of the marker segment whose length field (Lxxx, which counts itself) was just
+    // read, or nullptr when the segment does not fit in the codestream: that is reported
+    // and ends the parse, so no handler reads past `end` or walks backwards.
+    auto segment = [&](uint32_t marker, size_t mpos, uint32_t len) -> const uint8_t* {
+        if (len < 2 || (size_t)(rd.end - rd.p) < (size_t)len - 2) {
+            r.error("marker " + hex(marker) + " at offset " + std::to_string(mpos) + ": segment length " +
+                    std::to_string(len) + " runs past the end of the codestream");
+            rd.fail = true;
+            return nullptr;
+        }
+        return rd.p + len - 2;
+    };
+
     while (!rd.fail && rd.p < rd.end) {
         const size_t mpos = rd.pos(data);
         const uint32_t m = rd.u16();
@@ -94,7 +107,8 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             ++nCOD;
             if (!inMain) r.error("COD in tile-part header");
             const uint32_t len = rd.u16();
-            const uint8_t* next = rd.p + len - 2;
+            const uint8_t* next = segment(m, mpos, len);
+            if (!next) break;
             const uint32_t scod = rd.u8();
             r.progression = (int)rd.u8();
             r.layers = (int)rd.u16();
@@ -124,7 +138,8 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
         case 0xFF5C: {  // QCD
             ++nQCD;
             const uint32_t len = rd.u16();
-            const uint8_t* next = rd.p + len - 2;
+            const uint8_t* next = segment(m, mpos, len);
+            if (!next) break;
             const uint32_t sq = rd.u8();
             r.guardBits = (int)(sq >> 5);
             r.qstyle = (int)(sq & 0x1F);
@@ -147,7 +162,8 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             if (inMain) ++nPOCmain;
             else ++nPOClate;
             const uint32_t len = rd.u16();
-            const uint8_t* next = rd.p + len - 2;
+            const uint8_t* next = segment(m, mpos, len);
+            if (!next) break;
             static const int expect[14] = {0, 0, 1, 6, 3, 4, 6, 0, 1, 7, 3, 4};
             if (len != 16) r.error("POC length must be 16");
             else {
@@ -162,7 +178,8 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
         case 0xFF55: {  // TLM
             r.tlm = true;
             const uint32_t len = rd.u16();
-            const uint8_t* next = rd.p + len - 2;
+            const uint8_t* next = segment(m, mpos, len);
+            if (!next) break;
             rd.u8();  // Ztlm
             const uint32_t st = rd.u8();
             const int stBytes = (st >> 4) & 3, spBytes = ((st >> 6) & 1) ? 4 : 2;
@@ -177,9 +194,12 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
         }
         case 0xFF53: case 0xFF5D: case 0xFF64: {  // COC, QCC, COM
             const uint32_t len = rd.u16();
+            const uint8_t* next = segment(m, mpos, len);
+            if (!next) break;
+            // Rcom = 1: Latin-1 text; the text is the len - 4 bytes up to `next` (in bounds)
             if (m == 0xFF64 && len >= 4 && inMain && rd.p[0] == 0 && rd.p[1] == 1)
                 r.comment.assign((const char*)rd.p + 2, len - 4);
-            rd.p += len - 2;
+            rd.p = next;
             if (m == 0xFF53) r.warnings.push_back("COC marker present");
             break;
         }
@@ -202,7 +222,7 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
                         std::to_string((size_t)maxTP) + " byte limit");
             const int comp = (int)tpsot % 3;
             r.compBytes[comp] += psot;
-            if (psot < 14 || sot + psot > rd.end) {
+            if (psot < 14 || (size_t)psot > (size_t)(rd.end - sot)) {  // compared, never formed, past the end
                 r.error("invalid Psot");
                 rd.fail = true;
                 break;

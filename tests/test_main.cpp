@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <algorithm>
 #include <atomic>
@@ -926,6 +927,9 @@ static void testFaults() {
     po.slotsPerDevice = 2;
     std::vector<std::string> notes;
     po.onLog = [&](const std::string& m) { notes.push_back(m); };
+    // onReady: once per run that got its slots, before any frame, never when set-up failed
+    int ready = 0;
+    long long readyAt = -1;
     auto faulty = [](int failAt, int slots) {
         auto d = std::make_unique<FaultyDevice>();
         d->inner = createCpuDevice(0);
@@ -939,6 +943,7 @@ static void testFaults() {
     // runPipeline() with its outcome as a string: "" when it completed, else the error
     auto attempt = [&](std::vector<std::unique_ptr<Device>>& devs, FrameSource& src, PipelineSummary* sum = nullptr) {
         notes.clear();
+        ready = 0;
         try {
             PipelineSummary s = runPipeline(src, devs, L, es, po);
             if (sum) *sum = s;
@@ -952,6 +957,10 @@ static void testFaults() {
     po.onFrame = [&](const FrameStats& st, const std::vector<uint8_t>& cs) {
         inOrder = inOrder && st.index == delivered && !cs.empty();
         ++delivered;
+    };
+    po.onReady = [&] {
+        ++ready;
+        readyAt = delivered;
     };
 
     // one of two devices dies on its third frame: the run stops with that error, and what was
@@ -977,6 +986,7 @@ static void testFaults() {
         const std::string err = attempt(devs, *src, &sum);
         CHECK(err.empty() && sum.frames == 6 && delivered == 6 && inOrder, "slot refused: error \"%s\", %lld frames",
               err.c_str(), sum.frames);
+        CHECK(ready == 1 && readyAt == 0, "slot refused: onReady called %d times, after %lld frames", ready, readyAt);
         CHECK(sum.slotsPerDevice.size() == 1 && sum.slotsPerDevice[0] == 1 && noted("running with 1 frame(s) in flight"),
               "slot refused: %d frames in flight, %zu notes", sum.slotsPerDevice.empty() ? -1 : sum.slotsPerDevice[0],
               notes.size());
@@ -990,6 +1000,7 @@ static void testFaults() {
         po.cpuFallback = false;
         std::string err = attempt(devs, *src);
         CHECK(err.find("no device has memory") != std::string::npos && delivered == 0, "no slot: error \"%s\"", err.c_str());
+        CHECK(ready == 0, "no slot: onReady called %d times although set-up failed", ready);
         po.cpuFallback = true;
         PipelineSummary sum;
         src = openPatternSource(W, H, 4, 3);
@@ -997,6 +1008,7 @@ static void testFaults() {
         CHECK(err.empty() && sum.frames == 4 && devs.size() == 2 && sum.framesPerDevice.size() == 2 &&
                   sum.framesPerDevice[1] == 4 && noted("encoding on the CPU"),
               "no slot, CPU fallback: error \"%s\", %lld frames on %zu devices", err.c_str(), sum.frames, devs.size());
+        CHECK(ready == 1 && readyAt == 0, "CPU fallback: onReady called %d times, after %lld frames", ready, readyAt);
         po.cpuFallback = false;
     }
     // the source fails on its third frame
@@ -1052,6 +1064,181 @@ static void testFaults() {
     }
 }
 
+// Frame sources must report a frame they cannot read as an error, not as the end of the
+// stream, so a run never ends short and silently.
+static void testSourceErrors() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "gail_test_xyz";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const int W = 1998, H = 1080;
+    const size_t frameBytes = (size_t)W * H * 6;
+    const std::vector<uint8_t> good(frameBytes, 0), shortFrame(1000, 0);
+    auto write = [&](const char* name, const std::vector<uint8_t>& data) {
+        FILE* f = std::fopen((dir / name).string().c_str(), "wb");
+        std::fwrite(data.data(), 1, data.size(), f);
+        std::fclose(f);
+    };
+    write("a.xyz", good);
+    write("b.xyz", shortFrame);
+    write("c.xyz", good);
+    auto src = openXyzDirSource(dir.string(), W, H, -1);
+    std::vector<uint8_t> buf(frameBytes);
+    CHECK(src->read(buf.data()), "first .xyz frame");
+    std::string err;
+    try {
+        src->read(buf.data());
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    CHECK(err.find("b.xyz") != std::string::npos && err.find("500 samples") != std::string::npos, "short .xyz frame: \"%s\"",
+          err.c_str());  // 1000 bytes are 500 samples
+    fs::remove_all(dir);
+
+    // ffmpeg itself failing (here: an input that does not exist) must surface, not look like
+    // a clip with no frames
+    SourceOptions so;
+    so.path = (fs::temp_directory_path() / "gail_test_missing_input.mkv").string();
+    so.width = W;
+    so.height = H;
+    SourceInfo info;
+    info.width = 1920, info.height = 1080, info.pixFmt = "yuv420p";
+    err.clear();
+    try {
+        auto ff = openFfmpegSource(so, info);
+        std::fprintf(stderr, "  (expect an ffmpeg error about a missing file here)\n");
+        while (ff->read(buf.data())) {}
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    if (err.find("failed to start") != std::string::npos) std::printf("  (ffmpeg not installed: child status check skipped)\n");
+    else CHECK(err.find("ffmpeg failed") != std::string::npos, "failing ffmpeg child: \"%s\"", err.c_str());
+}
+
+// The Y'CbCr matrix both input paths use: the stream's tag, else the HD/SD rule (the RGB path
+// used to leave untagged sources to swscale, which takes BT.601 at any size).
+static void testSourceMatrix() {
+    SourceInfo s;
+    s.width = 1920, s.height = 1080;
+    CHECK(sourceMatrix(s) == "bt709", "untagged HD: %s", sourceMatrix(s).c_str());
+    s.matrix = "unknown";
+    CHECK(sourceMatrix(s) == "bt709", "HD tagged unknown: %s", sourceMatrix(s).c_str());
+    s.height = 576;
+    CHECK(sourceMatrix(s) == "bt601", "untagged SD: %s", sourceMatrix(s).c_str());
+    s.primaries = "bt2020";
+    CHECK(sourceMatrix(s) == "bt2020", "untagged with BT.2020 primaries: %s", sourceMatrix(s).c_str());
+    s.matrix = "smpte170m";
+    CHECK(sourceMatrix(s) == "bt601", "tagged smpte170m: %s", sourceMatrix(s).c_str());
+    s.matrix = "bt470bg";
+    CHECK(sourceMatrix(s) == "bt601", "tagged bt470bg: %s", sourceMatrix(s).c_str());
+    s.matrix = "bt709";
+    s.height = 480;
+    CHECK(sourceMatrix(s) == "bt709", "tagged bt709 at SD: %s", sourceMatrix(s).c_str());
+    s.matrix = "bt2020nc";
+    CHECK(sourceMatrix(s) == "bt2020", "tagged bt2020nc: %s", sourceMatrix(s).c_str());
+}
+
+// Truncated and malformed codestreams must come back as errors from the checker without it
+// reading outside the buffer (each case sits in an exactly sized heap block, so a
+// sanitizer build catches any over-read) or looping.
+static void testCheckerMalformed() {
+    // SOC + SIZ (2K flat, three 12-bit components): the valid start every case shares
+    std::vector<uint8_t> head = {0xFF, 0x4F, 0xFF, 0x51, 0, 47, 0, 3};
+    for (uint32_t v : {1998u, 1080u, 0u, 0u, 1998u, 1080u, 0u, 0u})
+        for (int s = 24; s >= 0; s -= 8) head.push_back((uint8_t)(v >> s));
+    head.insert(head.end(), {0, 3, 11, 1, 1, 11, 1, 1, 11, 1, 1});
+    struct Case {
+        const char* name;
+        std::vector<uint8_t> tail;
+        const char* expect;  // part of an error message
+    };
+    const Case cases[] = {
+        {"COM truncated after Lcom", {0xFF, 0x64, 0x00, 0xC8}, "runs past the end"},
+        {"COM claiming 200 bytes", {0xFF, 0x64, 0x00, 0xC8, 0, 1, 'x', 'y'}, "runs past the end"},
+        {"COD with Lcod 0", {0xFF, 0x52, 0, 0, 0, 0, 0, 0}, "runs past the end"},
+        {"QCD with Lqcd 1", {0xFF, 0x5C, 0, 1, 0, 0}, "runs past the end"},
+        {"TLM with Ltlm 0", {0xFF, 0x55, 0, 0, 0, 0}, "runs past the end"},
+        {"POC past the end", {0xFF, 0x5F, 0, 16, 0, 0}, "runs past the end"},
+        {"SOT past the end", {0xFF, 0x90, 0, 10, 0, 0, 0, 0, 1, 0, 0, 3, 0xFF, 0x93}, "invalid Psot"},
+        {"nothing after SIZ", {}, "missing EOC"},
+    };
+    auto check = [&](const char* name, const std::vector<uint8_t>& v, const char* expect) {
+        std::unique_ptr<uint8_t[]> buf(new uint8_t[v.size() + 1]);  // +1: a zero-length block is not portable
+        std::copy(v.begin(), v.end(), buf.get());
+        const CheckReport rep = checkDciCodestream(buf.get(), v.size(), 24);
+        const bool found = std::any_of(rep.errors.begin(), rep.errors.end(),
+                                       [&](const std::string& e) { return e.find(expect) != std::string::npos; });
+        CHECK(!rep.ok && found, "%s: ok %d, errors: %s", name, (int)rep.ok, formatReport(rep, false).c_str());
+    };
+    for (const Case& c : cases) {
+        std::vector<uint8_t> v = head;
+        v.insert(v.end(), c.tail.begin(), c.tail.end());
+        check(c.name, v, c.expect);
+    }
+    check("empty buffer", {}, "SOC");
+    // every prefix of a header with a COM and a TLM
+    std::vector<uint8_t> full = head;
+    full.insert(full.end(), {0xFF, 0x64, 0, 8, 0, 1, 'G', 'A', 'I', 'L', 0xFF, 0x55, 0, 19, 0, 0x50});
+    for (int i = 0; i < 3; ++i) full.insert(full.end(), {0, 0, 0, 0, 0});
+    for (size_t n = 1; n < full.size(); ++n) {
+        std::unique_ptr<uint8_t[]> buf(new uint8_t[n]);
+        std::copy(full.begin(), full.begin() + n, buf.get());
+        CHECK(!checkDciCodestream(buf.get(), n, 24).ok, "prefix of %zu bytes passed", n);
+    }
+    std::printf("  %zu malformed cases and %zu prefixes rejected\n", sizeof cases / sizeof cases[0] + 1, full.size() - 1);
+}
+
+// Frame budgets the codestream headers alone cannot meet: dciLimits() must not wrap around,
+// allocateRate() must still return (with every pass dropped), and the pipeline must refuse
+// the budget up front instead of producing frames that fail the DCI check.
+static void testRateLimits() {
+    const RateLimits dci = dciLimits(24, 230);
+    CHECK(dci.maxTotal == 1197900 && dci.maxComp == 1041650, "DCI limits at 24 fps: %zu / %zu", dci.maxTotal, dci.maxComp);
+    CHECK(dciLimits(24, 0.0001).maxTotal == 0 && dciLimits(24, 230, 0.0001).maxComp == 0, "a tiny budget wrapped around");
+    CHECK(dciLimits(0, 230).maxTotal == 0 && dciLimits(24, 0).maxTotal == 0, "a zero rate or frame rate wrapped around");
+
+    const int W = 1998, H = 1080;
+    const FrameLayout L = makeLayout(W, H, Profile::Cinema2K, 1.0);
+    const size_t headers = emptyCodestreamBytes(L);
+    // 3 tile-parts and one byte per packet, a few hundred bytes in all
+    CHECK(headers > 100 && headers < 2000, "empty 2K codestream is %zu bytes", headers);
+    auto src = openPatternSource(W, H, 1, 3);
+    std::vector<uint16_t> rgb((size_t)W * H * 3);
+    src->read(rgb.data());
+    EncodeSettings es;
+    es.width = W;
+    es.height = H;
+    es.input = src->format();
+    Tier1Frame t1;
+    createCpuDevice(0)->createSlot(L, es)->encode(rgb.data(), t1);
+    // no budget at all: everything is dropped and the call comes back
+    const RateResult rr = allocateRate(L, t1, RateLimits{0, 0});
+    const bool none = std::all_of(rr.passes.begin(), rr.passes.end(), [](uint8_t p) { return p == 0; });
+    CHECK(none && rr.sizes.total == headers, "zero budget: passes left %d, %zu bytes", !none, rr.sizes.total);
+    // exactly the header size is met
+    const RateResult rh = allocateRate(L, t1, RateLimits{headers, headers});
+    CHECK(rh.sizes.total <= headers, "header-sized budget: %zu bytes", rh.sizes.total);
+    std::printf("  2K headers %zu bytes; zero and header-sized budgets handled\n", headers);
+
+    // the pipeline refuses a budget below the headers before encoding anything
+    std::vector<std::unique_ptr<Device>> devs;
+    devs.push_back(createCpuDevice(0));
+    PipelineOptions po;
+    po.check = false;
+    po.fps = 24;
+    po.limits = RateLimits{headers - 1, headers - 1};
+    int frames = 0;
+    po.onFrame = [&](const FrameStats&, const std::vector<uint8_t>&) { ++frames; };
+    std::string err;
+    try {
+        runPipeline(*openPatternSource(W, H, 2, 3), devs, L, es, po);
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    CHECK(err.find("headers") != std::string::npos && frames == 0, "budget below the headers: \"%s\", %d frames", err.c_str(),
+          frames);
+}
+
 int main(int argc, char** argv) {
     std::string only = argc > 1 ? argv[1] : "";
     auto run = [&](const char* name, const std::function<void()>& fn) {
@@ -1072,6 +1259,10 @@ int main(int argc, char** argv) {
     run("fit", testFitSlots);
     run("cpus", testCpuCount);
     run("faults", testFaults);
+    run("limits", testRateLimits);
+    run("checker", testCheckerMalformed);
+    run("matrix", testSourceMatrix);
+    run("sources", testSourceErrors);
 #ifdef GAIL_HAVE_VULKAN
     run("gpumem", [] { testGpuMemory(false); });
     run("gpucolor", [] { testGpuColor(false); });

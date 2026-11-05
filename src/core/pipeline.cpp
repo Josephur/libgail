@@ -45,6 +45,13 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
     if (src.width() != L.width || src.height() != L.height) throw std::runtime_error("source size mismatch");
     if (s.input.kind != src.format().kind || s.input.bytes() != frameBytes)
         throw std::runtime_error("encoder input format does not match the source");
+    // A budget the headers alone exceed can never be met: refuse it here rather than
+    // producing frames that fail the DCI check (the rate control cannot drop headers).
+    const size_t headerBytes = emptyCodestreamBytes(L);
+    if (o.limits.maxTotal < headerBytes)
+        throw std::runtime_error("the frame budget of " + std::to_string(o.limits.maxTotal) +
+                                 " bytes is below the " + std::to_string(headerBytes) +
+                                 " bytes the codestream headers take: raise the bitrate or lower the frame rate");
 
     auto note = [&](const std::string& m) {
         if (o.onLog) o.onLog(m);
@@ -95,6 +102,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
     sum.framesPerDevice.assign(devices.size(), 0);
     sum.slotsPerDevice = made;
     sum.slotsRetired.assign(devices.size(), 0);
+    if (o.onReady) o.onReady();  // every device set-up error has been thrown by now
 
     // Memory pressure during the run: twice a second one of a device's slots asks the driver
     // how much memory is left; when another process has taken so much that less than half

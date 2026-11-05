@@ -26,6 +26,11 @@ int main(int argc, char** argv) {
     int bad = 0;
     for (auto& f : files) {
         std::ifstream in(f, std::ios::binary);
+        if (!in) {  // not a malformed codestream: say so instead of "does not start with SOC"
+            std::printf("%s: cannot read the file\n", f.c_str());
+            ++bad;
+            continue;
+        }
         std::vector<uint8_t> d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         auto r = gail::checkDciCodestream(d.data(), d.size(), fps);
         if (!r.ok) ++bad;

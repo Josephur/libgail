@@ -27,4 +27,9 @@ const char* codestreamLabel();
 void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* passes, std::vector<uint8_t>* out,
                      CodestreamSizes* sizes);
 
+// Size of the codestream with no coding pass included: the main header, the tile-part
+// headers and one byte per empty packet. The smallest frame this layout can produce, so
+// no frame budget below it can be met (the rate control cannot drop anything else).
+size_t emptyCodestreamBytes(const FrameLayout& L);
+
 }  // namespace gail

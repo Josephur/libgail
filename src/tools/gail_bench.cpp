@@ -23,7 +23,13 @@ int main(int argc, char** argv) {
     bool check = false, rgbInput = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        auto next = [&] { return std::string(argv[++i]); };
+        auto next = [&]() -> std::string {
+            if (i + 1 >= argc) {  // argv[argc] is NULL: std::string would throw and abort the process
+                std::fprintf(stderr, "missing value for %s\n", a.c_str());
+                std::exit(2);
+            }
+            return argv[++i];
+        };
         if (a == "-i") input = next();
         else if (a == "--backend") backend = next();
         else if (a == "--gpus") gpus = next();
@@ -49,6 +55,10 @@ int main(int argc, char** argv) {
                                  "                  [--device-memory MB] [--step X] [--check]\n");
             return 2;
         }
+    }
+    if (!(mbps > 0) || mbps > 250 || !(fps > 0)) {  // also catches NaN; a zero budget would switch the rate control off
+        std::fprintf(stderr, "--mbps must be in (0, 250] and --fps positive\n");
+        return 2;
     }
     try {
         const Profile prof = profileStr == "2k" ? Profile::Cinema2K : Profile::Cinema4K;
