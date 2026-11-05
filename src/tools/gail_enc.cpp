@@ -319,6 +319,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "  device %zu: %lld frames (%d in flight%s)\n", d, sum.framesPerDevice[d],
                          sum.slotsPerDevice[d],
                          sum.slotsRetired[d] ? (", " + std::to_string(sum.slotsRetired[d]) + " given up").c_str() : "");
+        if (sum.frames == 0) {  // a source that produced nothing is a failed job, not an empty success
+            std::fprintf(stderr, "error: no frames were encoded\n");
+            return 1;
+        }
         return sum.nonCompliant ? 1 : 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

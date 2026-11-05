@@ -31,20 +31,24 @@ struct Child {
     pid_t pid = -1;
 #endif
     // Closes the pipe and reaps the process; `stop` ends it first if it is still running.
-    void close(bool stop) {
+    // Returns the child's exit status: 0 when it finished normally, its code otherwise, or
+    // -1 when it was stopped or the status is unknown.
+    int close(bool stop) {
+        int status = -1;
 #if defined(_WIN32)
         (void)stop;  // the child gets a broken pipe and exits
-        if (f) _pclose(f);
+        if (f) status = _pclose(f);
 #else
         if (f) fclose(f);
         if (pid > 0) {
             if (stop) kill(pid, SIGTERM);
-            int st;
-            waitpid(pid, &st, 0);
+            int st = 0;
+            if (waitpid(pid, &st, 0) == pid && !stop) status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
         }
         pid = -1;
 #endif
         f = nullptr;
+        return status;
     }
 };
 
@@ -106,7 +110,7 @@ double parseRational(const std::string& s) {
 
 class FfmpegSource : public FrameSource {
 public:
-    FfmpegSource(const SourceOptions& o, const SourceInfo& info) {
+    FfmpegSource(const SourceOptions& o, const SourceInfo& info) : path_(o.path) {
         const int W = o.width, H = o.height;
         int sw = W, sh = H;
         if (o.fitToContainer && info.width > 0 && info.height > 0) {
@@ -175,12 +179,29 @@ public:
         args.insert(args.end(), {"-vf", vf.str(), "-f", "rawvideo", "-"});
         child_ = spawnRead(args);
     }
-    ~FfmpegSource() override { child_.close(true); }
+    ~FfmpegSource() override {
+        if (child_.f) child_.close(true);
+    }
     const FrameFormat& format() const override { return fmt_; }
-    bool read(void* dst) override { return fread(dst, 1, fmt_.bytes(), child_.f) == fmt_.bytes(); }
+    // End of stream only when FFmpeg finished cleanly: a child that failed (bad input, a
+    // filter it lacks, a decode error) or a partial frame is an error, not a short clip.
+    bool read(void* dst) override {
+        if (!child_.f) return false;
+        const size_t got = fread(dst, 1, fmt_.bytes(), child_.f);
+        if (got == fmt_.bytes()) return true;
+        const int status = child_.close(false);
+        if (status != 0)
+            throw std::runtime_error("ffmpeg failed while decoding " + path_ + " (exit status " + std::to_string(status) +
+                                     "); see its messages above");
+        if (got != 0)
+            throw std::runtime_error("ffmpeg delivered a partial frame of " + path_ + " (" + std::to_string(got) + " of " +
+                                     std::to_string(fmt_.bytes()) + " bytes)");
+        return false;
+    }
 
 private:
     FrameFormat fmt_;
+    std::string path_;
     Child child_;
 };
 
@@ -270,15 +291,21 @@ public:
     const FrameFormat& format() const override { return fmt_; }
     bool read(void* dst) override {
         if (next_ >= files_.size()) return false;
-        FILE* f = fopen(files_[next_++].c_str(), "rb");
-        if (!f) return false;
+        // A file that cannot be read is an error, not the end of the sequence: silently
+        // stopping there would drop it and every frame after it.
+        const std::string& path = files_[next_++];
+        FILE* f = fopen(path.c_str(), "rb");
+        if (!f) throw std::runtime_error("cannot open " + path);
         uint16_t* p = (uint16_t*)dst;
         const size_t n = (size_t)fmt_.width * fmt_.height * 3;
-        const bool ok = fread(p, 2, n, f) == n;
+        const size_t got = fread(p, 2, n, f);
         fclose(f);
+        if (got != n)
+            throw std::runtime_error(path + " holds " + std::to_string(got) + " samples, not the " + std::to_string(n) +
+                                     " of a " + std::to_string(fmt_.width) + "x" + std::to_string(fmt_.height) + " frame");
         // 12-bit code -> 16-bit signal value; the gamma26/xyz colour path maps it back exactly
         for (size_t i = 0; i < n; ++i) p[i] = (uint16_t)((p[i] * 65535u + 2047u) / 4095u);
-        return ok;
+        return true;
     }
 
 private:

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <algorithm>
 #include <atomic>
@@ -1063,6 +1064,56 @@ static void testFaults() {
     }
 }
 
+// Frame sources must report a frame they cannot read as an error, not as the end of the
+// stream, so a run never ends short and silently.
+static void testSourceErrors() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "gail_test_xyz";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const int W = 1998, H = 1080;
+    const size_t frameBytes = (size_t)W * H * 6;
+    const std::vector<uint8_t> good(frameBytes, 0), shortFrame(1000, 0);
+    auto write = [&](const char* name, const std::vector<uint8_t>& data) {
+        FILE* f = std::fopen((dir / name).string().c_str(), "wb");
+        std::fwrite(data.data(), 1, data.size(), f);
+        std::fclose(f);
+    };
+    write("a.xyz", good);
+    write("b.xyz", shortFrame);
+    write("c.xyz", good);
+    auto src = openXyzDirSource(dir.string(), W, H, -1);
+    std::vector<uint8_t> buf(frameBytes);
+    CHECK(src->read(buf.data()), "first .xyz frame");
+    std::string err;
+    try {
+        src->read(buf.data());
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    CHECK(err.find("b.xyz") != std::string::npos && err.find("1000") != std::string::npos, "short .xyz frame: \"%s\"", err.c_str());
+    fs::remove_all(dir);
+
+    // ffmpeg itself failing (here: an input that does not exist) must surface, not look like
+    // a clip with no frames
+    SourceOptions so;
+    so.path = (fs::temp_directory_path() / "gail_test_missing_input.mkv").string();
+    so.width = W;
+    so.height = H;
+    SourceInfo info;
+    info.width = 1920, info.height = 1080, info.pixFmt = "yuv420p";
+    err.clear();
+    try {
+        auto ff = openFfmpegSource(so, info);
+        std::fprintf(stderr, "  (expect an ffmpeg error about a missing file here)\n");
+        while (ff->read(buf.data())) {}
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    if (err.find("failed to start") != std::string::npos) std::printf("  (ffmpeg not installed: child status check skipped)\n");
+    else CHECK(err.find("ffmpeg failed") != std::string::npos, "failing ffmpeg child: \"%s\"", err.c_str());
+}
+
 // The Y'CbCr matrix both input paths use: the stream's tag, else the HD/SD rule (the RGB path
 // used to leave untagged sources to swscale, which takes BT.601 at any size).
 static void testSourceMatrix() {
@@ -1210,6 +1261,7 @@ int main(int argc, char** argv) {
     run("limits", testRateLimits);
     run("checker", testCheckerMalformed);
     run("matrix", testSourceMatrix);
+    run("sources", testSourceErrors);
 #ifdef GAIL_HAVE_VULKAN
     run("gpumem", [] { testGpuMemory(false); });
     run("gpucolor", [] { testGpuColor(false); });
