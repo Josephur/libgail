@@ -57,6 +57,7 @@ add_library(gail_core STATIC
   src/core/quant.cpp
   src/core/t1_ref.cpp
   src/core/t1_dec.cpp
+  src/core/t1_dec_tables.cpp
   src/core/rate_control.cpp
   src/core/t2.cpp
   src/core/codestream_check.cpp
@@ -131,7 +132,7 @@ if(NOT GAIL_ENABLE_CUDA STREQUAL "OFF")
     set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_RUNTIME_LIBRARY Static)  # no cudart DLL to ship; only the NVIDIA driver is needed
     set(GAIL_CUDA_ARCHS "75;86;89;120" CACHE STRING "CUDA architectures for the optional CUDA backend")
-    add_library(gail_cuda STATIC src/cuda/cuda_backend.cu)
+    add_library(gail_cuda STATIC src/cuda/cuda_backend.cu src/cuda/cuda_decode.cu)
     set_target_properties(gail_cuda PROPERTIES CUDA_ARCHITECTURES "${GAIL_CUDA_ARCHS}")
     target_link_libraries(gail_cuda PUBLIC gail_core)
     target_compile_definitions(gail_cuda PUBLIC GAIL_HAVE_CUDA=1)

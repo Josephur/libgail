@@ -1893,6 +1893,92 @@ static void testT1DecodeKernel() {
     }
 }
 
+#if defined(GAIL_HAVE_VULKAN) || defined(GAIL_HAVE_CUDA)
+// A GPU decode slot against the CPU decoder: the dequantized coefficients (Tier-1 and
+// step sizes) must be the same to the bit; the picture, which goes through the float
+// wavelet on a different machine, within one code value.
+static void testGpuDecode(Profile prof, bool cuda) {
+    std::vector<std::unique_ptr<Device>> devs;
+#ifdef GAIL_HAVE_CUDA
+    if (cuda) devs = createCudaDevices({}, stderrLogger(false));
+#endif
+#ifdef GAIL_HAVE_VULKAN
+    if (!cuda) devs = createVulkanDevices({}, stderrLogger(false));
+#endif
+    devs.erase(std::remove_if(devs.begin(), devs.end(), [](const std::unique_ptr<Device>& d) { return !d->canDecode(); }), devs.end());
+    if (devs.empty()) {
+        std::printf("  (skipped: no %s device that decodes on this machine)\n", cuda ? "CUDA" : "Vulkan");
+        return;
+    }
+    const EncodedFrame f = encodeCpuFrame(prof);
+    StreamHeader h;
+    std::string err;
+    CHECK(parseCodestream(f.cs.data(), f.cs.size(), false, h, err) && h.supported, "parse: %s %s", err.c_str(), h.unsupported.c_str());
+    const FrameLayout L = layoutFor(h);
+    const int W = L.width;
+    auto pool = std::make_shared<ThreadPool>(usableCpuCount(), false);
+    for (int reduce = 0; reduce <= 1; ++reduce) {
+        std::vector<CblkCode> blk;
+        CHECK(parsePackets(f.cs.data(), h, L, L.levels - reduce, blk, err), "packets: %s", err.c_str());
+        DecodeSettings ds;
+        ds.reduce = reduce;
+        ds.highBits = reduce == 0;
+        int w, hh;
+        decodedSize(L, reduce, w, hh);
+        std::vector<uint16_t> want((size_t)w * hh * 3);
+        std::vector<float> wantCoef[3];
+        DecodeTimings tc;
+        tc.wavelet = wantCoef;
+        createCpuDecoderSlot(L, ds, pool)->decode(L, f.cs.data(), f.cs.size(), blk, want.data(), (ptrdiff_t)w * 6, &tc);
+        for (auto& d : devs) {
+            auto slot = d->createDecoderSlot(L, ds);
+            const ptrdiff_t stride = (ptrdiff_t)w * 6 + 14;
+            std::vector<uint8_t> got((size_t)stride * hh, 0x3C);
+            std::vector<float> gotCoef[3];
+            DecodeTimings tg;
+            tg.wavelet = gotCoef;
+            slot->decode(L, f.cs.data(), f.cs.size(), blk, got.data(), stride, &tg);
+            // coefficients of the resolutions that were decoded
+            size_t coefBad = 0;
+            for (int i = 0; i < L.numCblks(); ++i) {
+                const CodeBlock& cb = L.cblks[i];
+                const Subband& b = L.bands[cb.band];
+                if (b.res > L.levels - reduce) continue;
+                for (int y = 0; y < cb.h; ++y) {
+                    const size_t at = (size_t)(b.py0 + cb.y0 + y) * W + b.px0 + cb.x0;
+                    coefBad += std::memcmp(&gotCoef[b.comp][at], &wantCoef[b.comp][at], (size_t)cb.w * sizeof(float)) != 0;
+                }
+            }
+            CHECK(coefBad == 0, "%s reduce %d: %zu code-block rows of coefficients differ from the CPU decoder", d->name().c_str(),
+                  reduce, coefBad);
+            int maxd = 0, touched = 0;
+            size_t differ = 0;
+            for (int y = 0; y < hh; ++y) {
+                const uint16_t* row = (const uint16_t*)(got.data() + (size_t)y * stride);
+                for (int i = 0; i < w * 3; ++i) {
+                    const int dd = std::abs((int)row[i] - (int)want[(size_t)y * w * 3 + i]) >> (ds.highBits ? 4 : 0);
+                    maxd = std::max(maxd, dd);
+                    differ += dd != 0;
+                }
+                for (int i = 0; i < 14; ++i) touched += got[(size_t)y * stride + (size_t)w * 6 + i] != 0x3C;
+            }
+            std::printf("  %s %s reduce %d: Tier-1 %.2f ms, wavelet %.2f, color + download %.2f, total %.2f; pixels: max diff %d, "
+                        "%.4f%% differ\n", d->name().c_str(), profileName(prof), reduce, tg.t1, tg.dwt, tg.color, tg.total, maxd,
+                        100.0 * (double)differ / ((double)w * hh * 3));
+            CHECK(maxd <= 1 && differ * 50 < (size_t)w * hh * 3, "%s reduce %d: picture deviates from the CPU decoder (max %d, %zu "
+                  "samples)", d->name().c_str(), reduce, maxd, differ);
+            CHECK(touched == 0, "%s: %d padding bytes written", d->name().c_str(), touched);
+            // the same slot again, timed without the test's extra download
+            DecodeTimings t2;
+            slot->decode(L, f.cs.data(), f.cs.size(), blk, got.data(), stride, &t2);
+            slot->decode(L, f.cs.data(), f.cs.size(), blk, got.data(), stride, &t2);
+            std::printf("    steady state: Tier-1 %.2f ms, wavelet %.2f, color + download %.2f, total %.2f\n", t2.t1, t2.dwt, t2.color,
+                        t2.total);
+        }
+    }
+}
+#endif
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1982,6 +2068,8 @@ int main(int argc, char** argv) {
     run("gpu4k", [] { testGpu(Profile::Cinema4K, false); });
 #endif
 #ifdef GAIL_HAVE_CUDA
+    run("cudadec2k", [] { testGpuDecode(Profile::Cinema2K, true); });
+    run("cudadec4k", [] { testGpuDecode(Profile::Cinema4K, true); });
     run("cudamem", [] { testGpuMemory(true); });
     run("cudacolor", [] { testGpuColor(true); });
     run("cuda2k", [] { testGpu(Profile::Cinema2K, true); });

@@ -66,6 +66,8 @@ public:
             }
         });
         const auto t1 = std::chrono::steady_clock::now();
+        if (tm && tm->wavelet)
+            for (int c = 0; c < 3; ++c) tm->wavelet[c] = planes_[c];
 
         idwt97_2d(pl, 3, W, L_.height, L_.levels, s_.reduce, &par_);
         const auto t2 = std::chrono::steady_clock::now();
@@ -107,8 +109,6 @@ private:
 };
 
 }  // namespace
-
-bool backendDecodes(const std::string& backend) { return backend == "cpu"; }
 
 std::unique_ptr<DecoderSlot> createCpuDecoderSlot(const FrameLayout& L, const DecodeSettings& s, std::shared_ptr<ThreadPool> pool) {
     return std::make_unique<CpuDecoderSlot>(L, s, std::move(pool));

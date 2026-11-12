@@ -16,6 +16,8 @@
 
 #include "core/backend.h"
 #include "core/t1_ref.h"
+#include "cuda/cuda_common.h"
+#include "cuda/cuda_decode.h"
 
 // ---- shared Tier-1 kernels (portable headers) -------------------------------------
 // MQ output sink with capacity check; the coder's contexts and probability table live
@@ -49,12 +51,6 @@ __shared__ uint32_t s_tab[47];
 namespace gail {
 
 namespace {
-
-#define CUCHECK(x)                                                                                        \
-    do {                                                                                                  \
-        cudaError_t e_ = (x);                                                                             \
-        if (e_ != cudaSuccess) throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e_) + " at " #x); \
-    } while (0)
 
 constexpr int MAX_PASSES = 64;
 constexpr int MAX_PLANES = 24;
@@ -776,17 +772,6 @@ SlotSizes slotSizes(const FrameLayout& L, const EncodeSettings& s) {
     return z;
 }
 
-// cudaMalloc / cudaHostAlloc failing for lack of memory becomes DeviceOutOfMemory (and the
-// error is cleared, so the device stays usable); anything else is a plain CUDA error.
-void cuAlloc(cudaError_t e, const char* what, size_t bytes) {
-    if (e == cudaSuccess) return;
-    if (e == cudaErrorMemoryAllocation) {
-        cudaGetLastError();
-        throw DeviceOutOfMemory(std::string("cannot allocate ") + std::to_string(bytes >> 20) + " MiB of " + what);
-    }
-    throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e) + " allocating " + what);
-}
-
 class CudaSlot : public EncoderSlot {
 public:
     CudaSlot(int dev, const FrameLayout& L, const EncodeSettings& s, const Logger& log)
@@ -1086,6 +1071,10 @@ public:
     }
     uint64_t slotBytes(const FrameLayout& L, const EncodeSettings& s) const override {
         return slotSizes(L, s).deviceBytes();
+    }
+    bool canDecode() const override { return true; }
+    std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout& L, const DecodeSettings& s) override {
+        return createCudaDecoderSlot(dev_, L, s);
     }
     DeviceMemory memory() const override {
         DeviceMemory m;

@@ -24,6 +24,9 @@ struct DecodeSettings {
 
 struct DecodeTimings {
     double t1 = 0, dwt = 0, color = 0, total = 0;  // ms; t1 includes dequantization
+    // For tests: when set, three vectors that receive the dequantized wavelet planes
+    // (width x height floats each) as they are before the inverse wavelet.
+    std::vector<float>* wavelet = nullptr;
 };
 
 // Size of the decoded picture for a layout and a reduction.
@@ -49,9 +52,6 @@ public:
 
 // CPU reference backend. The slot keeps the settings by value and the geometry of L.
 std::unique_ptr<DecoderSlot> createCpuDecoderSlot(const FrameLayout& L, const DecodeSettings& s, std::shared_ptr<ThreadPool> pool);
-
-// Whether a backend ("cuda", "vulkan", "cpu") of this build has decode slots.
-bool backendDecodes(const std::string& backend);
 
 // Whether two layouts describe the same frame structure (size, levels, bands, blocks),
 // whatever their step sizes.

@@ -25,4 +25,7 @@ std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const st
                                                    const std::vector<std::string>& ids, int cpuThreads,
                                                    bool cpuLowPriority, const Logger& log, std::string& chosen);
 
+// Whether a backend ("cuda", "vulkan", "cpu") of this build can decode.
+bool backendDecodes(const std::string& backend);
+
 }  // namespace gail

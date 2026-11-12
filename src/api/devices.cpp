@@ -149,4 +149,11 @@ std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const st
     return devices;
 }
 
+bool backendDecodes(const std::string& backend) {
+#ifdef GAIL_HAVE_CUDA
+    if (backend == "cuda") return true;
+#endif
+    return backend == "cpu";
+}
+
 }  // namespace gail
