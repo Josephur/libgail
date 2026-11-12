@@ -56,6 +56,7 @@ add_library(gail_core STATIC
   src/core/dwt_cpu.cpp
   src/core/quant.cpp
   src/core/t1_ref.cpp
+  src/core/t1_dec.cpp
   src/core/rate_control.cpp
   src/core/t2.cpp
   src/core/codestream_check.cpp

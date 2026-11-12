@@ -26,6 +26,7 @@
 #include "core/progression.h"
 #include "core/quant.h"
 #include "core/rate_control.h"
+#include "core/t1_dec.h"
 #include "core/t1_ref.h"
 #include "core/t2.h"
 #include "core/t2_parse.h"
@@ -1574,6 +1575,75 @@ static void testParse(Profile prof, Container cont) {
     CHECK(accepted == 0, "%d truncated codestreams parsed as complete", accepted);
 }
 
+// The production block decoder against the independent test decoder: the same signs and
+// magnitudes for every block at every truncation point, with the mid-point of the
+// undecoded bit-planes where the standard puts it, and nothing written outside the block.
+static void testT1Decode() {
+    std::mt19937 rng(42);
+    int blocks = 0, checks = 0;
+    for (int trial = 0; trial < 400; ++trial) {
+        const int w = trial % 7 == 0 ? 1 + rng() % 32 : 32;
+        const int h = trial % 5 == 0 ? 1 + rng() % 32 : 32;
+        const int orient = trial % 4;
+        std::vector<uint32_t> c(kCblkArea, 0);
+        const int mode = trial % 3;
+        std::normal_distribution<double> g(0, mode == 0 ? 20 : (mode == 1 ? 300 : 3000));
+        std::uniform_real_distribution<double> sp(0, 1);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                double v = g(rng);
+                if (mode == 1 && sp(rng) < 0.7) v *= 0.05;
+                c[y * 32 + x] = quantizeCoeff((float)v, 1.0f, (1u << 26) - 1);
+            }
+        T1Result res;
+        t1EncodeRef(c.data(), w, h, orient, res);
+        if (!res.nbps) continue;
+        ++blocks;
+        for (int k = 1; k <= res.numPasses; ++k) {
+            const uint32_t len = res.passLen[k - 1];
+            const auto ref = test::t1Decode(res.data.data(), len, w, h, orient, res.nbps, k);
+            std::vector<uint32_t> out(kCblkArea, 0xDEADBEEFu);
+            t1DecodeBlock(res.data.data(), len, w, h, orient, res.nbps, k, out.data());
+            int bad = 0, outside = 0;
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x) {
+                    const uint32_t v = out[y * 32 + x];
+                    if (x >= w || y >= h) {
+                        outside += v != 0xDEADBEEFu;
+                        continue;
+                    }
+                    const int i = y * w + x;
+                    const uint32_t want = ref.sig[i] ? ((uint32_t)ref.sign[i] << 31) | (2 * ref.mag[i] + (1u << ref.low[i])) : 0u;
+                    bad += v != want;
+                }
+            CHECK(bad == 0 && outside == 0, "trial %d, %d of %d passes: %d samples wrong, %d written outside the block", trial, k,
+                  res.numPasses, bad, outside);
+            ++checks;
+        }
+        // all passes: exactly the quantizer's integer part, mid-point half a step above it
+        std::vector<uint32_t> out(kCblkArea, 0);
+        t1DecodeBlock(res.data.data(), (uint32_t)res.data.size(), w, h, orient, res.nbps, res.numPasses, out.data());
+        int bad = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const uint32_t m = (c[y * 32 + x] & 0x7FFFFFFF) >> kFracBits;
+                bad += out[y * 32 + x] != (m ? (c[y * 32 + x] & 0x80000000u) | (2 * m + 1) : 0u);
+            }
+        CHECK(bad == 0, "trial %d: full decode differs from the quantized block in %d samples", trial, bad);
+    }
+    std::printf("  %d blocks, %d truncation points\n", blocks, checks);
+
+    // Damaged data decodes to something without touching memory outside the codeword
+    for (int trial = 0; trial < 300; ++trial) {
+        const uint32_t len = rng() % 200;
+        std::vector<uint8_t> junk(len);
+        for (auto& b : junk) b = trial % 3 ? (uint8_t)rng() : 0xFF;
+        std::vector<uint32_t> out(kCblkArea, 0);
+        const int nbps = 1 + (int)(rng() % 22);
+        t1DecodeBlock(junk.data(), len, 32, 32, trial % 4, nbps, 3 * nbps - 2, out.data());
+    }
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1638,6 +1708,7 @@ int main(int argc, char** argv) {
     run("norms", testNorms);
     run("t1", testT1Truncation);
     run("t1limit", testT1PassLimit);
+    run("t1dec", testT1Decode);
     run("frame2k", [] { testFrameCpu(Profile::Cinema2K); });
     run("frame4k", [] { testFrameCpu(Profile::Cinema4K); });
     run("yuv4k", [] { testYuv(Profile::Cinema4K); });

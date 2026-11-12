@@ -98,6 +98,7 @@ private:
 struct T1Decoded {
     std::vector<uint32_t> mag;
     std::vector<uint8_t> sign, sig;
+    std::vector<uint8_t> low;  // for a significant sample, the lowest bit-plane it was coded in
 };
 
 inline T1Decoded t1Decode(const uint8_t* data, size_t len, int w, int h, int orient, int nbps, int passes) {
@@ -106,6 +107,7 @@ inline T1Decoded t1Decode(const uint8_t* data, size_t len, int w, int h, int ori
     r.mag.assign(w * h, 0);
     r.sign.assign(w * h, 0);
     r.sig.assign(w * h, 0);
+    r.low.assign(w * h, 0);
     std::vector<uint8_t> vis(w * h, 0), ref(w * h, 0);
     auto S = [&](int x, int y) -> int { return (x >= 0 && y >= 0 && x < w && y < h) ? r.sig[y * w + x] : 0; };
     auto chi = [&](int x, int y) -> int { return S(x, y) ? (r.sign[y * w + x] ? -1 : 1) : 0; };
@@ -140,6 +142,7 @@ inline T1Decoded t1Decode(const uint8_t* data, size_t len, int w, int h, int ori
                             r.mag[y * w + x] |= 1u << p;
                             sign(x, y);
                             r.sig[y * w + x] = 1;
+                            r.low[y * w + x] = (uint8_t)p;
                             k = first + 1;
                         }
                     }
@@ -154,18 +157,21 @@ inline T1Decoded t1Decode(const uint8_t* data, size_t len, int w, int h, int ori
                                 r.mag[i] |= 1u << p;
                                 sign(x, y);
                                 r.sig[i] = 1;
+                                r.low[i] = (uint8_t)p;
                             }
                         } else if (type == 1) {
                             if (!r.sig[i] || vis[i]) continue;
                             const uint32_t cx = ref[i] ? 16 : (zc(x, y) ? 15 : 14);
                             if (mq.decode(cx)) r.mag[i] |= 1u << p;
                             ref[i] = 1;
+                            r.low[i] = (uint8_t)p;
                         } else {
                             if (r.sig[i] || vis[i]) continue;
                             if (mq.decode(zc(x, y))) {
                                 r.mag[i] |= 1u << p;
                                 sign(x, y);
                                 r.sig[i] = 1;
+                                r.low[i] = (uint8_t)p;
                             }
                         }
                     }
