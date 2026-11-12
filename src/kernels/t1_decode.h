@@ -21,8 +21,8 @@
 // The words written are those of core/t1_dec.h: bit 31 the sign, the low bits twice the
 // magnitude plus the mid-point of the bit-planes not decoded. The output must be zero
 // beforehand; samples that stay insignificant are not written.
-#ifndef GAIL_T1_DECODER_H
-#define GAIL_T1_DECODER_H
+#ifndef GAIL_T1_DECODE_H
+#define GAIL_T1_DECODE_H
 
 #include "kernels/mq_decoder.h"
 #include "kernels/portable.h"
