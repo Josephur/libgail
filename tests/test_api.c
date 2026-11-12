@@ -3,6 +3,9 @@
    codestreams (pull, callback, blocking from several threads), every input format,
    letterboxed pictures, canceling, errors and the binary-compatibility rules. Uses
    whatever devices are present (CPU fallback). */
+#include <math.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -431,6 +434,368 @@ static void test_abi(void) {
           "device_info reserved words not zeroed");
 }
 
+/* ---- decoder ----------------------------------------------------------------------------- */
+
+#define DEC_FRAMES 6
+typedef struct dec_set {
+    int w, h;
+    gail_packet pkt[DEC_FRAMES];
+    uint16_t* src[DEC_FRAMES]; /* 12-bit codes in the low bits */
+} dec_set;
+
+/* PSNR of a decoded picture (codes shifted left by `shift`) against 12-bit source codes. */
+static double psnr_xyz(const uint8_t* img, ptrdiff_t stride, const uint16_t* src, int w, int h, int shift) {
+    double se = 0;
+    for (int y = 0; y < h; ++y) {
+        const uint16_t* row = (const uint16_t*)(img + (ptrdiff_t)y * stride);
+        for (int i = 0; i < w * 3; ++i) {
+            const double d = (double)(row[i] >> shift) - (double)src[(size_t)y * w * 3 + i];
+            se += d * d;
+        }
+    }
+    return se == 0 ? 99.0 : 10.0 * log10(4095.0 * 4095.0 * (double)w * h * 3 / se);
+}
+
+static int dec_cb_calls, dec_cb_bad;
+static void dec_on_image(void* user, const gail_image* img) {
+    const dec_set* s = (const dec_set*)user;
+    const int rw = (s->w + 1) / 2, rh = (s->h + 1) / 2;
+    if (img->index != dec_cb_calls || img->status != GAIL_OK || img->width != rw || img->height != rh || !img->data[0] ||
+        img->format != GAIL_PIX_XYZ12 || img->opaque != (void*)(intptr_t)(500 + img->index))
+        ++dec_cb_bad;
+    else {
+        /* half size, codes in the low bits: every word is a 12-bit code */
+        const uint16_t* px = (const uint16_t*)img->data[0];
+        for (int i = 0; i < rw * 3; ++i) dec_cb_bad += px[i] > 4095;
+    }
+    ++dec_cb_calls;
+}
+
+typedef struct dec_thread {
+    gail_decoder* d;
+    const dec_set* s;
+    const uint8_t* want; /* frame 0 as decoded before, tightly packed */
+    int bad;
+} dec_thread;
+static thread_ret THREAD_FN dec_worker(void* arg) {
+    dec_thread* t = (dec_thread*)arg;
+    for (int i = 0; i < 3; ++i) {
+        gail_image img;
+        memset(&img, 0, sizeof img);
+        if (gail_decoder_decode(t->d, &t->s->pkt[0], &img) != GAIL_OK ||
+            memcmp(img.data[0], t->want, (size_t)t->s->w * t->s->h * 6) != 0)
+            ++t->bad;
+        gail_image_free(&img);
+    }
+    return 0;
+}
+
+static void test_decoder(void) {
+    dec_set s;
+    memset(&s, 0, sizeof s);
+    gail_config ec;
+    gail_config_defaults(&ec);
+    ec.input.format = GAIL_PIX_XYZ12;
+    gail_encoder* e = make("decoder source", &ec);
+    if (!e) return;
+    gail_encoder_frame_size(e, &s.w, &s.h);
+    const int w = s.w, h = s.h;
+    for (int f = 0; f < DEC_FRAMES; ++f) {
+        s.src[f] = (uint16_t*)malloc((size_t)w * h * 6);
+        /* a smooth picture that moves: something a codec can represent well */
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                for (int c = 0; c < 3; ++c)
+                    s.src[f][((size_t)y * w + x) * 3 + c] = (uint16_t)(600 + ((x + 9 * f) * (c + 2) + y * (3 - c)) % 2800);
+        gail_frame fr = {{s.src[f]}, {0}, NULL};
+        CHECK(gail_encoder_encode(e, &fr, &s.pkt[f]) == GAIL_OK, "decoder source: encode %d: %s", f, gail_last_error());
+        s.pkt[f].opaque = (void*)(intptr_t)(500 + f);
+    }
+    gail_encoder_destroy(e);
+
+    /* probe */
+    gail_stream_info info;
+    CHECK(gail_probe(s.pkt[0].data, s.pkt[0].size, &info) == GAIL_OK && info.supported == 1 && info.width == w &&
+              info.height == h && info.components == 3 && info.bit_depth == 12 && info.rsiz == 3 && info.levels == 5 &&
+              !info.reversible && !info.high_throughput && info.tiles == 1 && info.layers == 1,
+          "probe: %dx%d, supported %d (%s)", info.width, info.height, info.supported, gail_last_error());
+    CHECK(gail_probe(s.pkt[0].data, 40, &info) == GAIL_ERROR_INVALID, "probe of a cut-off header accepted");
+    CHECK(gail_probe("not a codestream at all", 23, &info) == GAIL_ERROR_INVALID, "probe of text accepted");
+    {
+        /* a lossless stream is JPEG 2000 but not one for this decoder: say so, do not fail */
+        uint8_t* copy = (uint8_t*)malloc(s.pkt[0].size);
+        memcpy(copy, s.pkt[0].data, s.pkt[0].size);
+        size_t cod = 0;
+        for (size_t i = 2; i + 1 < 200; ++i)
+            if (copy[i] == 0xFF && copy[i + 1] == 0x52) cod = i;
+        CHECK(cod, "no COD marker found");
+        copy[cod + 13] = 1; /* SPcod transformation: 5/3 reversible */
+        CHECK(gail_probe(copy, s.pkt[0].size, &info) == GAIL_OK && info.supported == 0 && info.reversible == 1 &&
+                  strstr(gail_last_error(), "5/3"),
+              "probe of a 5/3 stream: supported %d, %s", info.supported, gail_last_error());
+        free(copy);
+    }
+
+    gail_decoder_config dc;
+    gail_decoder* d = NULL;
+
+    /* blocking, library buffer, codes in the high bits (the default) */
+    gail_decoder_config_defaults(&dc);
+    CHECK(dc.output == GAIL_PIX_XYZ12_MSB && dc.reduce == 0 && dc.backend == GAIL_BACKEND_AUTO, "decoder defaults");
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK && d, "decoder create: %s", gail_last_error());
+    if (!d) return;
+    printf("  decoder on %s\n", gail_decoder_devices(d));
+    uint8_t* frame0 = (uint8_t*)malloc((size_t)w * h * 6);
+    for (int f = 0; f < DEC_FRAMES; ++f) {
+        gail_image img;
+        memset(&img, 0, sizeof img);
+        const int r = gail_decoder_decode(d, &s.pkt[f], &img);
+        CHECK(r == GAIL_OK && img.status == GAIL_OK && img.width == w && img.height == h && img.data[0] &&
+                  img.stride[0] == (ptrdiff_t)w * 6 && img.format == GAIL_PIX_XYZ12_MSB && img.opaque == s.pkt[f].opaque,
+              "decode %d: %s", f, gail_last_error());
+        if (r != GAIL_OK) continue;
+        const double p = psnr_xyz((const uint8_t*)img.data[0], img.stride[0], s.src[f], w, h, 4);
+        if (f == 0) {
+            printf("  decoded frame 0: %.2f dB against the source (encoder's estimate %.2f)\n", p, s.pkt[0].psnr_estimate);
+            memcpy(frame0, img.data[0], (size_t)w * h * 6);
+        }
+        /* as close as the encoder said it would be (an estimate above 60 dB means nothing was cut) */
+        const double promised = s.pkt[f].psnr_estimate < 60 ? s.pkt[f].psnr_estimate : 60;
+        CHECK(p > promised - 1.5, "decode %d: %.2f dB, encoder estimated %.2f", f, p, s.pkt[f].psnr_estimate);
+        /* an image that still holds a picture is not silently overwritten or leaked */
+        CHECK(gail_decoder_decode(d, &s.pkt[f], &img) == GAIL_ERROR_INVALID, "decode into an unreleased image accepted");
+        gail_image_free(&img);
+        CHECK(img.data[0] == NULL, "gail_image_free left the pointer");
+        gail_image_free(&img); /* twice is harmless */
+    }
+
+    /* several threads at once: the same picture every time */
+    {
+        dec_thread th[4];
+        thread_t tid[4];
+        for (int i = 0; i < 4; ++i) {
+            th[i].d = d;
+            th[i].s = &s;
+            th[i].want = frame0;
+            th[i].bad = 0;
+            thread_start(&tid[i], dec_worker, &th[i]);
+        }
+        int bad = 0;
+        for (int i = 0; i < 4; ++i) {
+            thread_join(tid[i]);
+            bad += th[i].bad;
+        }
+        CHECK(bad == 0, "decode from 4 threads: %d wrong pictures", bad);
+    }
+
+    /* a frame that cannot be decoded fails alone, and says why */
+    {
+        gail_image img;
+        gail_packet junk;
+        memset(&junk, 0, sizeof junk);
+        static uint8_t noise[5000];
+        for (size_t i = 0; i < sizeof noise; ++i) noise[i] = (uint8_t)(i * 31 + 7);
+        junk.data = noise;
+        junk.size = sizeof noise;
+        memset(&img, 0, sizeof img);
+        CHECK(gail_decoder_decode(d, &junk, &img) == GAIL_ERROR_INVALID && !img.data[0], "noise decoded: %s", gail_last_error());
+        junk.data = s.pkt[1].data;
+        junk.size = s.pkt[1].size / 2;
+        CHECK(gail_decoder_decode(d, &junk, &img) == GAIL_ERROR_INVALID && !img.data[0] && strstr(gail_last_error(), "damaged"),
+              "half a codestream decoded: %s", gail_last_error());
+        printf("  rejected as expected: %s\n", gail_last_error());
+        CHECK(gail_decoder_error(d) == NULL, "a bad frame stopped the decoder: %s", gail_decoder_error(d));
+        CHECK(gail_decoder_decode(d, &s.pkt[2], &img) == GAIL_OK, "decode after a bad frame: %s", gail_last_error());
+        gail_image_free(&img);
+
+        /* a caller's buffer that is too narrow, reserved words, an empty packet */
+        uint8_t* small = (uint8_t*)malloc((size_t)w * h * 6);
+        memset(&img, 0, sizeof img);
+        img.data[0] = small;
+        img.stride[0] = (ptrdiff_t)w * 6 - 2;
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_ERROR_INVALID && strstr(gail_last_error(), "stride"),
+              "short stride accepted");
+        img.stride[0] = 0;
+        img.reserved[0] = 1;
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_ERROR_INVALID, "non-zero gail_image.reserved accepted");
+        img.reserved[0] = 0;
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_OK && img.data[0] == small && img.stride[0] == (ptrdiff_t)w * 6 &&
+                  memcmp(small, frame0, (size_t)w * h * 6) == 0,
+              "decode into the caller's buffer: %s", gail_last_error());
+        gail_image_free(&img); /* not the library's: must leave it alone */
+        CHECK(img.data[0] == small, "gail_image_free touched the caller's buffer");
+        free(small);
+        gail_packet bad = s.pkt[0];
+        bad.reserved[1] = 1;
+        memset(&img, 0, sizeof img);
+        CHECK(gail_decoder_decode(d, &bad, &img) == GAIL_ERROR_INVALID, "non-zero gail_packet.reserved accepted");
+        bad.reserved[1] = 0;
+        bad.size = 0;
+        CHECK(gail_decoder_decode(d, &bad, &img) == GAIL_ERROR_INVALID, "empty packet accepted");
+    }
+
+    /* a frame of another size needs another decoder */
+    {
+        gail_config_defaults(&ec);
+        ec.input.format = GAIL_PIX_XYZ12;
+        ec.container = GAIL_CONTAINER_SCOPE;
+        gail_encoder* e2 = make("scope source", &ec);
+        if (e2) {
+            uint16_t* px = (uint16_t*)calloc((size_t)2048 * 858, 6);
+            gail_frame fr = {{px}, {0}, NULL};
+            gail_packet scope;
+            gail_image img;
+            memset(&img, 0, sizeof img);
+            CHECK(gail_encoder_encode(e2, &fr, &scope) == GAIL_OK, "scope source: %s", gail_last_error());
+            CHECK(gail_decoder_decode(d, &scope, &img) == GAIL_ERROR_UNSUPPORTED && strstr(gail_last_error(), "another decoder"),
+                  "a 2048x858 frame in a 1998x1080 decoder: %s", gail_last_error());
+            printf("  rejected as expected: %s\n", gail_last_error());
+            gail_packet_free(&scope);
+            free(px);
+            gail_encoder_destroy(e2);
+        }
+    }
+    gail_decoder_destroy(d);
+
+    /* pull: order kept, a damaged frame in the middle, one frame into a padded buffer of ours */
+    gail_decoder_config_defaults(&dc);
+    d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK, "decoder create: %s", gail_last_error());
+    if (d) {
+        const ptrdiff_t stride = (ptrdiff_t)w * 6 + 26;
+        uint8_t* mine = (uint8_t*)malloc((size_t)stride * h);
+        memset(mine, 0x5A, (size_t)stride * h);
+        gail_image img;
+        CHECK(gail_decoder_receive(d, &img, 0) == GAIL_EAGAIN, "receive before anything was sent");
+        for (int f = 0; f < DEC_FRAMES; ++f) {
+            gail_packet p = s.pkt[f];
+            gail_image dest;
+            memset(&dest, 0, sizeof dest);
+            if (f == 2) p.size = p.size * 2 / 3; /* damaged in transit */
+            if (f == 4) {
+                dest.data[0] = mine;
+                dest.stride[0] = stride;
+            }
+            CHECK(gail_decoder_send(d, &p, f == 4 ? &dest : NULL) == GAIL_OK, "send %d: %s", f, gail_last_error());
+        }
+        CHECK(gail_decoder_send(d, NULL, NULL) == GAIL_OK, "end of stream");
+        CHECK(gail_decoder_send(d, &s.pkt[0], NULL) == GAIL_ERROR_STATE, "send after the end of the stream accepted");
+        int got = 0, r;
+        while ((r = gail_decoder_receive(d, &img, 1)) == GAIL_OK) {
+            CHECK(img.index == got && img.opaque == s.pkt[got].opaque, "pull: image %d arrived as %lld", got, (long long)img.index);
+            if (got == 2) {
+                CHECK(img.status == GAIL_ERROR_INVALID && !img.data[0] && strstr(gail_last_error(), "damaged"),
+                      "pull: damaged frame came back with status %d (%s)", img.status, gail_last_error());
+            } else {
+                CHECK(img.status == GAIL_OK && img.data[0] && img.width == w && img.height == h, "pull: image %d: status %d", got,
+                      img.status);
+                if (img.status == GAIL_OK)
+                    CHECK(psnr_xyz((const uint8_t*)img.data[0], img.stride[0], s.src[got], w, h, 4) > 40, "pull: image %d is wrong", got);
+            }
+            if (got == 4) {
+                int touched = 0;
+                for (int y = 0; y < h; ++y)
+                    for (int i = 0; i < 26; ++i) touched += mine[(size_t)y * stride + (size_t)w * 6 + i] != 0x5A;
+                CHECK(img.data[0] == mine && img.stride[0] == stride && touched == 0, "pull: caller's buffer: %d padding bytes written",
+                      touched);
+            }
+            gail_image_free(&img);
+            ++got;
+        }
+        CHECK(r == GAIL_EOF && got == DEC_FRAMES, "pull: %d images, then %s", got, gail_status_string(r));
+        CHECK(gail_decoder_finish(d) == GAIL_OK, "finish after the end");
+        gail_decoder_destroy(d);
+        free(mine);
+    }
+
+    /* flush (a seek): what was sent before it never arrives, what is sent after it does */
+    gail_decoder_config_defaults(&dc);
+    d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK, "decoder create: %s", gail_last_error());
+    if (d) {
+        gail_image img;
+        for (int f = 0; f < 4; ++f) CHECK(gail_decoder_send(d, &s.pkt[f], NULL) == GAIL_OK, "send %d", f);
+        CHECK(gail_decoder_flush(d) == GAIL_OK, "flush: %s", gail_last_error());
+        CHECK(gail_decoder_receive(d, &img, 0) == GAIL_EAGAIN, "an image survived the flush");
+        CHECK(gail_decoder_send(d, &s.pkt[5], NULL) == GAIL_OK, "send after flush");
+        CHECK(gail_decoder_receive(d, &img, 1) == GAIL_OK && img.status == GAIL_OK && img.opaque == s.pkt[5].opaque && img.index == 4,
+              "after flush: index %lld", (long long)img.index);
+        gail_image_free(&img);
+        /* cancel: everything stops, nothing hangs */
+        for (int f = 0; f < 3; ++f) gail_decoder_send(d, &s.pkt[f], NULL);
+        gail_decoder_cancel(d);
+        CHECK(gail_decoder_receive(d, &img, 1) == GAIL_ERROR_CANCELLED, "receive after cancel");
+        CHECK(gail_decoder_send(d, &s.pkt[0], NULL) == GAIL_ERROR_CANCELLED, "send after cancel");
+        memset(&img, 0, sizeof img);
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_ERROR_CANCELLED, "decode after cancel");
+        CHECK(gail_decoder_finish(d) == GAIL_ERROR_CANCELLED, "finish after cancel");
+        gail_decoder_destroy(d);
+    }
+
+    /* callback, half size, codes in the low bits */
+    gail_decoder_config_defaults(&dc);
+    dc.reduce = 1;
+    dc.output = GAIL_PIX_XYZ12;
+    dc.on_image = dec_on_image;
+    dc.user = &s;
+    d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK, "decoder create (callback): %s", gail_last_error());
+    if (d) {
+        gail_image img;
+        dec_cb_calls = dec_cb_bad = 0;
+        for (int f = 0; f < DEC_FRAMES; ++f) CHECK(gail_decoder_send(d, &s.pkt[f], NULL) == GAIL_OK, "send %d (callback)", f);
+        CHECK(gail_decoder_receive(d, &img, 0) == GAIL_ERROR_STATE, "receive allowed in callback mode");
+        CHECK(gail_decoder_finish(d) == GAIL_OK, "finish (callback): %s", gail_last_error());
+        CHECK(dec_cb_calls == DEC_FRAMES && dec_cb_bad == 0, "callback: %d calls, %d wrong", dec_cb_calls, dec_cb_bad);
+        gail_decoder_destroy(d);
+    }
+
+    /* leaving out more levels than the stream has: that frame fails, with the reason */
+    gail_decoder_config_defaults(&dc);
+    dc.reduce = 6;
+    d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK, "decoder create (reduce 6): %s", gail_last_error());
+    if (d) {
+        gail_image img;
+        memset(&img, 0, sizeof img);
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_ERROR_INVALID && strstr(gail_last_error(), "levels"),
+              "reduce 6 on a 5-level stream: %s", gail_last_error());
+        gail_decoder_destroy(d);
+    }
+
+    /* settings and the binary-compatibility rules */
+    gail_decoder_config_defaults(&dc);
+    dc.output = GAIL_PIX_RGB48;
+    d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_ERROR_INVALID && !d, "RGB output accepted");
+    gail_decoder_config_defaults(&dc);
+    dc.reduce = -1;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_ERROR_INVALID && !d, "negative reduce accepted");
+    memset(&dc, 0, sizeof dc);
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_ERROR_INVALID && !d, "uninitialized decoder config accepted");
+    struct {
+        gail_decoder_config c;
+        uint64_t later[4];
+    } newer;
+    memset(&newer, 0xAB, sizeof newer);
+    gail_decoder_config_init(&newer.c, sizeof newer);
+    CHECK(newer.c.struct_size == sizeof newer && newer.later[0] == 0 && newer.later[3] == 0 && newer.c.output == GAIL_PIX_XYZ12_MSB,
+          "gail_decoder_config_init with a larger size");
+    CHECK(gail_decoder_create(&newer.c, &d) == GAIL_OK, "newer header, unused fields: %s", gail_last_error());
+    gail_decoder_destroy(d);
+    d = NULL;
+    newer.later[2] = 1;
+    CHECK(gail_decoder_create(&newer.c, &d) == GAIL_ERROR_UNSUPPORTED && !d, "newer header, a setting we lack accepted");
+    printf("  sizes: decoder_config %zu, image %zu, stream_info %zu\n", sizeof(gail_decoder_config), sizeof(gail_image),
+           sizeof(gail_stream_info));
+
+    free(frame0);
+    for (int f = 0; f < DEC_FRAMES; ++f) {
+        gail_packet_free(&s.pkt[f]);
+        free(s.src[f]);
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     char d[512] = "";
@@ -601,6 +966,7 @@ int main(void) {
 
     test_noise();
     test_abi();
+    test_decoder();
 
     /* errors are reported, not thrown */
     gail_encoder* e = NULL;

@@ -33,9 +33,10 @@ public:
             if (L_.bands[L_.cblks[i].band].res <= L_.levels - s_.reduce) wanted_.push_back(i);
     }
 
-    void decode(const uint8_t* data, size_t size, const std::vector<CblkCode>& blocks, void* dst, ptrdiff_t strideBytes,
-                DecodeTimings* tm) override {
-        if ((int)blocks.size() != L_.numCblks()) throw std::logic_error("code-block table does not match the layout");
+    void decode(const FrameLayout& frame, const uint8_t* data, size_t size, const std::vector<CblkCode>& blocks, void* dst,
+                ptrdiff_t strideBytes, DecodeTimings* tm) override {
+        if (!sameGeometry(frame, L_) || (int)blocks.size() != L_.numCblks())
+            throw std::logic_error("frame does not match the layout the slot was made for");
         const auto t0 = std::chrono::steady_clock::now();
         float* pl[3] = {planes_[0].data(), planes_[1].data(), planes_[2].data()};
         const int W = L_.width;
@@ -54,7 +55,7 @@ public:
             }
             uint32_t q[kCblkArea];
             t1DecodeBlock(data + code.offset, code.len, cb.w, cb.h, b.orient, code.nbps, code.passes, q);
-            const float half = 0.5f * b.delta;
+            const float half = 0.5f * frame.bands[cb.band].delta;
             for (int y = 0; y < cb.h; ++y) {
                 const uint32_t* src = q + y * kCblkSize;
                 float* row = plane + (size_t)y * W;
@@ -106,6 +107,8 @@ private:
 };
 
 }  // namespace
+
+bool backendDecodes(const std::string& backend) { return backend == "cpu"; }
 
 std::unique_ptr<DecoderSlot> createCpuDecoderSlot(const FrameLayout& L, const DecodeSettings& s, std::shared_ptr<ThreadPool> pool) {
     return std::make_unique<CpuDecoderSlot>(L, s, std::move(pool));

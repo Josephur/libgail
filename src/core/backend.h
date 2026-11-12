@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/color.h"
+#include "core/decode_backend.h"
 #include "core/layout.h"
 #include "core/tier1_types.h"
 
@@ -75,6 +76,11 @@ public:
     virtual ~Device() = default;
     virtual std::string name() const = 0;
     virtual std::unique_ptr<EncoderSlot> createSlot(const FrameLayout& layout, const EncodeSettings& s) = 0;
+    // Decoding (core/decode_backend.h), for the backends that have it.
+    virtual bool canDecode() const { return false; }
+    virtual std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout&, const DecodeSettings&) {
+        throw std::runtime_error(name() + " does not decode");
+    }
     // Device memory one slot for this layout allocates (0 = none / unknown), and what is
     // left now; the pipeline sizes the number of frames in flight from these.
     virtual uint64_t slotBytes(const FrameLayout&, const EncodeSettings&) const { return 0; }

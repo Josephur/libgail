@@ -144,7 +144,7 @@ if(NOT GAIL_ENABLE_CUDA STREQUAL "OFF")
 endif()
 
 # ---- libgail: include/gail/gail.h --------------------------------------------------------
-set(GAIL_API_SOURCES src/api/gail_api.cpp src/api/devices.cpp)
+set(GAIL_API_SOURCES src/api/gail_api.cpp src/api/gail_decoder_api.cpp src/api/devices.cpp)
 set(GAIL_LIB_TARGETS)
 
 function(gail_library target type)
@@ -226,6 +226,9 @@ if(GAIL_BUILD_TESTS)
   # public API, compiled as C against the installed-style header
   add_executable(gail-api-test tests/test_api.c)
   target_link_libraries(gail-api-test PRIVATE ${GAIL_LINK} Threads::Threads)
+  if(NOT WIN32)
+    target_link_libraries(gail-api-test PRIVATE m)
+  endif()
   add_test(NAME gail-api-test COMMAND gail-api-test)
 endif()
 

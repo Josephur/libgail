@@ -153,6 +153,11 @@ public:
         if (!pool_) pool_ = std::make_shared<ThreadPool>(threads_, lowPriority_);
         return std::make_unique<CpuSlot>(L, s, pool_);
     }
+    bool canDecode() const override { return true; }
+    std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout& L, const DecodeSettings& s) override {
+        if (!pool_) pool_ = std::make_shared<ThreadPool>(threads_, lowPriority_);
+        return createCpuDecoderSlot(L, s, pool_);
+    }
 
 private:
     int threads_;

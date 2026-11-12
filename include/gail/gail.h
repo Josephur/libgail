@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Joseph Stackhouse
  *
- * GAIL, GPU Accelerated Intraframe Library: a JPEG 2000 encoder for DCI (SMPTE ST 428-1 /
- * ST 429-4) picture tracks.
+ * GAIL, GPU Accelerated Intraframe Library: a JPEG 2000 encoder and decoder for DCI
+ * (SMPTE ST 428-1 / ST 429-4) picture tracks.
  *
  * Library API, version 1. Plain C (usable from C++ and any FFI); libgail.so / libgail.dll /
  * libgail.dylib, or the static libgail.a. pkg-config name: gail.
@@ -32,6 +32,9 @@
  *   gail_packet pkt;
  *   if (gail_encoder_encode(enc, &f, &pkt) == GAIL_OK) { write(pkt.data, pkt.size); gail_packet_free(&pkt); }
  *   gail_encoder_destroy(enc);
+ *
+ * The decoder (gail_decoder, further down) is the same in reverse: codestreams in,
+ * X'Y'Z' pictures out.
  */
 #ifndef GAIL_GAIL_H
 #define GAIL_GAIL_H
@@ -87,7 +90,7 @@ typedef enum gail_status {
     GAIL_ERROR_INVALID = -1,      /* invalid argument or setting */
     GAIL_ERROR_UNSUPPORTED = -2,  /* backend, device or format not available */
     GAIL_ERROR_NOMEM = -3,
-    GAIL_ERROR_FAILED = -4,       /* encoding failed: see gail_encoder_error() */
+    GAIL_ERROR_FAILED = -4,       /* encoding or decoding failed: see gail_last_error() / gail_encoder_error() */
     GAIL_ERROR_STATE = -5,        /* not allowed now (e.g. send after the end of the stream) */
     GAIL_ERROR_CANCELLED = -6     /* gail_encoder_cancel() was called */
 } gail_status;
@@ -376,6 +379,143 @@ GAIL_API int gail_enumerate_devices(gail_backend backend, gail_device_info* devi
 /* The same as text, one "backend index: name UUID (PCI bus ID)" per line. Returns the full
    length like snprintf, or a negative status. */
 GAIL_API int gail_list_devices(gail_backend backend, char* buf, size_t size);
+
+/* ---- decoder -----------------------------------------------------------------------
+ * Turns DCI JPEG 2000 codestreams (one per frame, SOC ... EOC, as stored in a DCP's picture
+ * track file) back into X'Y'Z' pictures. The same three ways as the encoder:
+ *
+ *   1. Pull:      gail_decoder_send() codestreams, gail_decoder_receive() images in send
+ *      order; gail_decoder_send(dec, NULL, NULL) ends the stream, then receive until GAIL_EOF.
+ *   2. Callback:  set config.on_image; it is called in send order from a decoder thread.
+ *   3. Blocking:  gail_decoder_decode() from any number of threads at once.
+ *
+ *   gail_decoder_config cfg;
+ *   gail_decoder_config_defaults(&cfg);
+ *   gail_decoder* dec;
+ *   if (gail_decoder_create(&cfg, &dec) != GAIL_OK) fprintf(stderr, "%s\n", gail_last_error());
+ *   gail_packet pkt = {0};
+ *   pkt.data = codestream; pkt.size = size;
+ *   gail_image img = {0};
+ *   if (gail_decoder_decode(dec, &pkt, &img) == GAIL_OK) { show(&img); gail_image_free(&img); }
+ *   gail_decoder_destroy(dec);
+ *
+ * The decoder takes its picture size from the first codestream; every later one must have
+ * the same size and structure (another size needs another decoder). A codestream that is
+ * damaged, or is not one this library decodes, fails on its own: the decoder carries on
+ * with the next. Codestreams are untrusted input and are treated as such. */
+
+/* What a codestream is, read from its main header alone (cheap; needs no decoder). */
+typedef struct gail_stream_info {
+    int width, height;      /* full size */
+    int components;
+    int bit_depth;
+    int rsiz;               /* Rsiz of the SIZ marker: 3 = DCI 2K, 4 = DCI 4K */
+    int levels;             /* wavelet decomposition levels: `reduce` can be at most this */
+    int reversible;         /* 1 = 5/3 wavelet (lossless), 0 = 9/7 */
+    int high_throughput;    /* 1 = HTJ2K (ISO/IEC 15444-15) block coding */
+    int tiles, layers;
+    int supported;          /* 1 if this library decodes it; 0: gail_last_error() says why not */
+    uint64_t reserved[8];
+} gail_stream_info;
+
+/* GAIL_OK and *info filled in (whether or not the stream is supported), or
+   GAIL_ERROR_INVALID when the data is not a JPEG 2000 codestream or its header is damaged. */
+GAIL_API int gail_probe(const void* data, size_t size, gail_stream_info* info);
+
+typedef struct gail_image {
+    void* data[3];          /* data[0]: width x height pixels of three 16-bit words (X', Y', Z') */
+    ptrdiff_t stride[3];    /* bytes per row */
+    int width, height;      /* after config.reduce */
+    gail_pixel_format format;
+    int64_t index;          /* 0-based order in which the codestream was handed over */
+    void* opaque;           /* the packet's opaque pointer */
+    int device;             /* which GPU / device decoded it */
+    int status;             /* GAIL_OK, or why this frame failed (then there is no picture) */
+    uint64_t reserved[4];   /* zero when the app fills the struct in; the library's own on return */
+} gail_image;
+
+/* Releases an image the library allocated (never free() it directly). Images decoded
+   into the caller's own buffer need no release; calling this on them does nothing. */
+GAIL_API void gail_image_free(gail_image* img);
+
+typedef void (*gail_image_cb)(void* user, const gail_image* img); /* img->data valid during the call only */
+
+typedef struct gail_decoder_config {
+    size_t struct_size;       /* sizeof(gail_decoder_config), set by gail_decoder_config_defaults() */
+    gail_backend backend;
+    const int* devices;       /* device indices to use; NULL = all */
+    int num_devices;
+    const char* const* device_ids;  /* or by ID, as gail_config.device_ids */
+    int num_device_ids;
+    int frames_in_flight;     /* per device (0 = default) */
+    uint64_t max_device_memory;  /* as gail_config.max_device_memory */
+    int cpu_threads;          /* CPU backend worker threads (0 = every core this process may use) */
+    int low_priority;         /* non-zero: the decoder's threads run below normal priority */
+    /* GAIL_PIX_XYZ12_MSB (default): 12-bit codes in the high bits of each word, FFmpeg's
+       xyz12le, what players and their display shaders expect. GAIL_PIX_XYZ12: in the low
+       bits, what the encoder takes. */
+    gail_pixel_format output;
+    /* Resolution levels to leave out: 1 decodes at half size, 2 at a quarter (rounded up),
+       for much less work. At most the stream's `levels`. */
+    int reduce;
+    gail_image_cb on_image;   /* NULL: images are collected for gail_decoder_receive() */
+    void* user;
+    gail_log_cb log;          /* NULL: no messages (the library never writes to stderr) */
+    void* log_user;
+    gail_log_level log_level;
+} gail_decoder_config;
+
+/* Defaults: all devices of the best backend, GAIL_PIX_XYZ12_MSB, full size. */
+GAIL_API void gail_decoder_config_init(gail_decoder_config* c, size_t struct_size);
+GAIL_INLINE void gail_decoder_config_defaults(gail_decoder_config* c) { gail_decoder_config_init(c, sizeof(gail_decoder_config)); }
+
+typedef struct gail_decoder gail_decoder;
+
+GAIL_API int gail_decoder_create(const gail_decoder_config* c, gail_decoder** decoder);
+GAIL_API void gail_decoder_destroy(gail_decoder* d);  /* waits for frames the devices are working on */
+GAIL_API const char* gail_decoder_devices(const gail_decoder* d);  /* "NVIDIA ... (CUDA), ..." */
+
+/* Hands over one codestream: pkt->data, pkt->size and pkt->opaque are read, and the data
+   is copied before returning. Blocks while every device is busy and as many frames again
+   are waiting. dest may be NULL (the library allocates the image; release it with
+   gail_image_free()) or name the caller's buffer in dest->data[0] with its row length in
+   dest->stride[0] (bytes; 0 = tightly packed, otherwise at least 6 x width; bytes of a row
+   past the picture are not written): the image is then decoded straight into it, and the
+   buffer must stay valid until that image has been received, or until gail_decoder_flush()
+   or gail_decoder_destroy() has returned. A NULL pkt ends the stream.
+   A codestream that cannot be decoded still takes its place in the order: its image
+   arrives with a negative status. */
+GAIL_API int gail_decoder_send(gail_decoder* d, const gail_packet* pkt, const gail_image* dest);
+
+/* Next image in send order. wait = 0 returns GAIL_EAGAIN when none is ready yet; wait = 1
+   blocks until one is. GAIL_EOF after the end of the stream once all are out. Returns
+   GAIL_OK for every image, including one whose own status says it failed (then
+   gail_last_error() has the reason). Only when config.on_image is NULL. */
+GAIL_API int gail_decoder_receive(gail_decoder* d, gail_image* img, int wait);
+
+/* Decodes one codestream and returns its image. Thread-safe; calls from several threads
+   are decoded concurrently. On entry img must be zeroed, or name the caller's buffer in
+   img->data[0] / img->stride[0] as for gail_decoder_send(). Returns the frame's status:
+   a negative one leaves no picture. Frames decoded this way never appear in receive /
+   on_image. */
+GAIL_API int gail_decoder_decode(gail_decoder* d, const gail_packet* pkt, gail_image* img);
+
+/* For a seek: drops every frame handed over with gail_decoder_send() and not yet
+   received (or not yet passed to on_image), without ending the stream. */
+GAIL_API int gail_decoder_flush(gail_decoder* d);
+
+/* Ends the stream (if not already) and waits until every frame has been decoded and, in
+   callback mode, delivered. */
+GAIL_API int gail_decoder_finish(gail_decoder* d);
+
+/* Stops decoding as soon as possible. Returns at once and may be called from any thread,
+   including the callbacks. Frames not yet delivered are dropped; blocked and later calls
+   return GAIL_ERROR_CANCELLED. */
+GAIL_API void gail_decoder_cancel(gail_decoder* d);
+
+/* NULL while all is well, else what stopped the decoder (a device failure; a frame that
+   cannot be decoded does not stop it). */
+GAIL_API const char* gail_decoder_error(const gail_decoder* d);
 
 #ifdef __cplusplus
 }

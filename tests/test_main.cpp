@@ -1676,7 +1676,7 @@ static void testDecodeCpu(Profile prof) {
     auto slot = createCpuDecoderSlot(L, ds, pool);
     std::vector<uint16_t> out((size_t)W * H * 3);
     DecodeTimings tm;
-    slot->decode(f.cs.data(), f.cs.size(), blk, out.data(), (ptrdiff_t)W * 6, &tm);
+    slot->decode(L, f.cs.data(), f.cs.size(), blk, out.data(), (ptrdiff_t)W * 6, &tm);
     int maxd = 0;
     const double psnr = psnr12(out.data(), f.xyz12.data(), out.size(), &maxd);
     const double est = 10 * std::log10(4095.0 * 4095 / (f.rr.distortion / ((double)W * H * 3)));
@@ -1686,7 +1686,7 @@ static void testDecodeCpu(Profile prof) {
 
     // a second frame through the same slot: nothing left over from the first
     std::vector<uint16_t> again((size_t)W * H * 3);
-    slot->decode(f.cs.data(), f.cs.size(), blk, again.data(), (ptrdiff_t)W * 6, nullptr);
+    slot->decode(L, f.cs.data(), f.cs.size(), blk, again.data(), (ptrdiff_t)W * 6, nullptr);
     CHECK(again == out, "decoding the same frame twice gave different pictures");
 
     // codes in the high bits, rows 10 bytes longer than the picture
@@ -1694,7 +1694,7 @@ static void testDecodeCpu(Profile prof) {
     auto hi = createCpuDecoderSlot(L, ds, pool);
     const ptrdiff_t stride = (ptrdiff_t)W * 6 + 10;
     std::vector<uint8_t> padded((size_t)stride * H, 0xA5);
-    hi->decode(f.cs.data(), f.cs.size(), blk, padded.data(), stride, nullptr);
+    hi->decode(L, f.cs.data(), f.cs.size(), blk, padded.data(), stride, nullptr);
     int wrong = 0, touched = 0;
     for (int y = 0; y < H; ++y) {
         const uint16_t* row = (const uint16_t*)(padded.data() + (size_t)y * stride);
@@ -1722,7 +1722,7 @@ static void testDecodeCpu(Profile prof) {
         decodedSize(L, reduce, w, hh);
         CHECK(w == (W + (1 << reduce) - 1) >> reduce && hh == (H + (1 << reduce) - 1) >> reduce, "reduced size %dx%d", w, hh);
         std::vector<uint16_t> got((size_t)w * hh * 3), want((size_t)w * hh * 3);
-        small->decode(f.cs.data(), f.cs.size(), low, got.data(), (ptrdiff_t)w * 6, nullptr);
+        small->decode(L, f.cs.data(), f.cs.size(), low, got.data(), (ptrdiff_t)w * 6, nullptr);
         for (int y = 0; y < hh; ++y)
             for (int x = 0; x < w; ++x) {
                 // the low-pass band sits in the top-left corner of the full-width plane

@@ -23,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "api/api_internal.h"
 #include "api/devices.h"
 #include "core/build_version.h"
 #include "core/color.h"
@@ -35,32 +36,11 @@ namespace {
 
 using namespace gail;
 
-thread_local std::string g_lastError = "no error";
-
-int fail(int status, const std::string& msg) {
-    g_lastError = msg;
-    return status;
-}
+using namespace gail::api;
 
 // gail_config of the 1.0 header, the smallest a program can pass: keep this at the 1.0 size
 // when fields are added to gail_config.
 constexpr size_t kConfigSizeV1 = sizeof(gail_config);
-
-template <class T, size_t N>
-bool allZero(const T (&words)[N]) {
-    return std::all_of(words, words + N, [](T w) { return w == 0; });
-}
-
-bool allZero(const void* p, size_t n) {
-    const uint8_t* b = static_cast<const uint8_t*>(p);
-    return std::all_of(b, b + n, [](uint8_t v) { return v == 0; });
-}
-
-// Error carrying the status the API call should return.
-struct ApiError : std::runtime_error {
-    int status;
-    ApiError(int s, const std::string& m) : std::runtime_error(m), status(s) {}
-};
 
 // A gail_encoder_encode() call waiting for its frame.
 struct Waiter {
@@ -470,7 +450,7 @@ const char* gail_status_string(int s) {
     case GAIL_ERROR_INVALID: return "invalid argument";
     case GAIL_ERROR_UNSUPPORTED: return "not supported";
     case GAIL_ERROR_NOMEM: return "out of memory";
-    case GAIL_ERROR_FAILED: return "encoding failed";
+    case GAIL_ERROR_FAILED: return "encoding or decoding failed";
     case GAIL_ERROR_STATE: return "not allowed in this state";
     case GAIL_ERROR_CANCELLED: return "canceled";
     }
