@@ -1405,6 +1405,63 @@ static void testProgression() {
     }
 }
 
+// A layout built from the frame's structure and the step sizes as signaled is the layout
+// the encoder builds for itself, field for field.
+static void testGeometry() {
+    const struct {
+        Profile p;
+        int w, h;
+    } cases[] = {{Profile::Cinema2K, 1998, 1080}, {Profile::Cinema2K, 2048, 858}, {Profile::Cinema2K, 2048, 1080},
+                 {Profile::Cinema4K, 3996, 2160}, {Profile::Cinema4K, 4096, 1716}, {Profile::Cinema4K, 4096, 2160}};
+    for (auto& cs : cases)
+        for (double step : {1.0, 2.0, 0.75}) {
+            const FrameLayout L = makeLayout(cs.w, cs.h, cs.p, step);
+            FrameLayout G = makeGeometry(cs.w, cs.h, cs.p, L.levels, L.guardBits);
+            std::vector<int> eps, mu;
+            for (int i = 0; i < L.bandsPerComp(); ++i) {
+                eps.push_back(L.bands[i].eps);
+                mu.push_back(L.bands[i].mu);
+            }
+            setSignaledSteps(G, eps.data(), mu.data());
+            bool same = G.profile == L.profile && G.width == L.width && G.height == L.height && G.levels == L.levels &&
+                        G.guardBits == L.guardBits && G.bands.size() == L.bands.size() && G.cblks.size() == L.cblks.size() &&
+                        G.resolutions.size() == L.resolutions.size();
+            for (size_t i = 0; same && i < L.bands.size(); ++i) {
+                const Subband &a = L.bands[i], &b = G.bands[i];
+                same = a.comp == b.comp && a.res == b.res && a.level == b.level && a.orient == b.orient && a.px0 == b.px0 &&
+                       a.py0 == b.py0 && a.w == b.w && a.h == b.h && a.ncbx == b.ncbx && a.ncby == b.ncby &&
+                       a.cblkBase == b.cblkBase && a.eps == b.eps && a.mu == b.mu && a.Mb == b.Mb &&
+                       std::memcmp(&a.delta, &b.delta, sizeof(float)) == 0;
+            }
+            for (size_t i = 0; same && i < L.cblks.size(); ++i) {
+                const CodeBlock &a = L.cblks[i], &b = G.cblks[i];
+                same = a.band == b.band && a.x0 == b.x0 && a.y0 == b.y0 && a.w == b.w && a.h == b.h;
+            }
+            for (size_t i = 0; same && i < L.resolutions.size(); ++i) {
+                const Resolution &a = L.resolutions[i], &b = G.resolutions[i];
+                same = a.comp == b.comp && a.res == b.res && a.w == b.w && a.h == b.h && a.ppx == b.ppx && a.ppy == b.ppy &&
+                       a.npx == b.npx && a.npy == b.npy && a.precincts.size() == b.precincts.size();
+                for (size_t k = 0; same && k < a.precincts.size(); ++k) {
+                    same = a.precincts[k].nb == b.precincts[k].nb;
+                    for (int j = 0; same && j < a.precincts[k].nb; ++j) {
+                        const PrecinctBand &x = a.precincts[k].bands[j], &y = b.precincts[k].bands[j];
+                        same = x.band == y.band && x.cbx0 == y.cbx0 && x.cby0 == y.cby0 && x.ncbx == y.ncbx && x.ncby == y.ncby;
+                    }
+                }
+            }
+            CHECK(same, "%dx%d step %.2f: geometry + signaled steps differs from makeLayout", cs.w, cs.h, step);
+        }
+    FrameLayout G = makeGeometry(2048, 1080, Profile::Cinema2K, 5, 1);
+    std::vector<int> eps(G.bandsPerComp(), 23), mu(G.bandsPerComp(), 0);
+    bool thrown = false;
+    try {
+        setSignaledSteps(G, eps.data(), mu.data());  // 1 + 23 - 1 = 23 bit-planes: one too many
+    } catch (const std::runtime_error&) {
+        thrown = true;
+    }
+    CHECK(thrown, "a step with more bit-planes than the coder carries was accepted");
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1462,6 +1519,7 @@ int main(int argc, char** argv) {
     run("bitio", testBitIo);
     run("tagtree", testTagTree);
     run("progression", testProgression);
+    run("geometry", testGeometry);
     run("dwt", testDwtRoundTrip);
     run("norms", testNorms);
     run("t1", testT1Truncation);

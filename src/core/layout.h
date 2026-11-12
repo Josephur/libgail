@@ -86,6 +86,14 @@ struct FrameLayout {
 // Build the layout. width/height must fit the profile container (2048x1080 / 4096x2160).
 FrameLayout makeLayout(int width, int height, Profile profile, double baseStep);
 
+// The parts of the layout that follow from the frame's structure alone: subbands,
+// code-blocks and precincts, with no step sizes. makeLayout() is this with the profile's
+// decomposition levels and guard bits, plus step sizes chosen from baseStep.
+FrameLayout makeGeometry(int width, int height, Profile profile, int levels, int guardBits);
+// Step sizes exactly as a QCD marker signals them: eps[i], mu[i] for band i of one
+// component, the same for every component.
+void setSignaledSteps(FrameLayout& L, const int* eps, const int* mu);
+
 // L2 norm of the synthesis basis function of a subband (standard 9/7 normalization).
 double synthesisNorm(int level, int orient);
 // Synthesis gain of the inverse ICT for component c (0=Y, 1=Cb, 2=Cr).
