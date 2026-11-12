@@ -4,14 +4,16 @@
 #pragma once
 #include <functional>
 
+#include "kernels/dwt97.h"
+
 namespace gail {
 
 // Lifting constants (Annex F.4.8.2 / F.3.8.2).
-constexpr double kAlpha = -1.586134342059924;
-constexpr double kBeta = -0.052980118572961;
-constexpr double kGamma = 0.882911075530934;
-constexpr double kDelta = 0.443506852043971;
-constexpr double kK = 1.230174104914001;
+constexpr double kAlpha = DWT97_ALPHA;
+constexpr double kBeta = DWT97_BETA;
+constexpr double kGamma = DWT97_GAMMA;
+constexpr double kDelta = DWT97_DELTA;
+constexpr double kK = DWT97_K;
 
 // Forward 1-D transform of n samples starting at an even coordinate.
 // Output is de-interleaved: ceil(n/2) low-pass samples followed by floor(n/2) high-pass.

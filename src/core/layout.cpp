@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core/dwt_cpu.h"
+#include "kernels/ict.h"
 
 namespace gail {
 
@@ -50,8 +51,8 @@ double synthesisNorm(int level, int orient) {
 }
 
 double ictSynthesisNorm(int comp) {
-    // Inverse ICT (Annex G.3): R = Y + 1.402 Cr; G = Y - 0.34413 Cb - 0.71414 Cr; B = Y + 1.772 Cb
-    static const double cols[3][3] = {{1, 1, 1}, {0, -0.34413, 1.772}, {1.402, -0.71414, 0}};
+    // Columns of the inverse ICT (kernels/ict.h): what one unit of each component adds to R, G, B
+    static const double cols[3][3] = {{1, 1, 1}, {0, ICT_G_Y1, ICT_B_Y1}, {ICT_R_Y2, ICT_G_Y2, 0}};
     double e = 0;
     for (int i = 0; i < 3; ++i) e += cols[comp][i] * cols[comp][i];
     return std::sqrt(e);

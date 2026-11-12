@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "kernels/ict.h"
+
 namespace gail {
 
 enum class Transfer { BT1886, SRGB, PQ, HLG, Linear, Gamma26 };
@@ -132,9 +134,9 @@ std::vector<float> readCubeLut(const std::string& path, int& size);
 
 // Forward ICT used on DC-shifted X'Y'Z' (Annex G.3).
 inline void ictForward(float x, float y, float z, float& c0, float& c1, float& c2) {
-    c0 = 0.299f * x + 0.587f * y + 0.114f * z;
-    c1 = -0.16875f * x - 0.33126f * y + 0.5f * z;
-    c2 = 0.5f * x - 0.41869f * y - 0.08131f * z;
+    c0 = (float)ICT_Y0_R * x + (float)ICT_Y0_G * y + (float)ICT_Y0_B * z;
+    c1 = (float)ICT_Y1_R * x + (float)ICT_Y1_G * y + (float)ICT_Y1_B * z;
+    c2 = (float)ICT_Y2_R * x + (float)ICT_Y2_G * y + (float)ICT_Y2_B * z;
 }
 
 }  // namespace gail
