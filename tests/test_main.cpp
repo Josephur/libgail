@@ -1738,6 +1738,96 @@ static void testDecodeCpu(Profile prof) {
     }
 }
 
+// Damaged codestreams: a frame with bits flipped, lengths edited or its end cut off is
+// refused or decodes to some picture. It never reads or writes out of bounds, which the
+// sanitizer build of this test checks, and the decoder works as before afterwards.
+static void testDecodeMutations() {
+    const EncodedFrame f = encodeCpuFrame(Profile::Cinema2K);
+    StreamHeader h0;
+    std::string err;
+    CHECK(parseCodestream(f.cs.data(), f.cs.size(), false, h0, err) && h0.supported, "parse: %s", err.c_str());
+    const FrameLayout L0 = layoutFor(h0);
+    auto pool = std::make_shared<ThreadPool>(usableCpuCount(), false);
+    auto slot = createCpuDecoderSlot(L0, DecodeSettings{}, pool);
+    std::vector<uint16_t> good((size_t)L0.width * L0.height * 3), out(good.size());
+    std::vector<CblkCode> blk;
+    CHECK(parsePackets(f.cs.data(), h0, L0, L0.levels, blk, err), "packets: %s", err.c_str());
+    slot->decode(L0, f.cs.data(), f.cs.size(), blk, good.data(), (ptrdiff_t)L0.width * 6, nullptr);
+
+    const size_t headerEnd = h0.tileParts[0].begin;
+    std::mt19937 rng(77);
+    int malformed = 0, unsupported = 0, badPackets = 0, decoded = 0, otherShape = 0;
+    for (int trial = 0; trial < 360; ++trial) {
+        std::vector<uint8_t> cs = f.cs;
+        switch (trial % 6) {
+        case 0:  // a few bits in the main header
+            for (int k = 1 + (int)(rng() % 3); k > 0; --k) cs[2 + rng() % (headerEnd - 2)] ^= (uint8_t)(1u << (rng() % 8));
+            break;
+        case 1:  // a byte of the main header replaced
+            cs[2 + rng() % (headerEnd - 2)] = (uint8_t)rng();
+            break;
+        case 2:  // bits anywhere: mostly packet headers and code-block data
+            for (int k = 1 + (int)(rng() % 8); k > 0; --k) cs[rng() % cs.size()] ^= (uint8_t)(1u << (rng() % 8));
+            break;
+        case 3:  // the start of a tile-part's packets, where the first packet headers are
+        {
+            const TilePartSpan& tp = h0.tileParts[rng() % h0.tileParts.size()];
+            for (int k = 1 + (int)(rng() % 4); k > 0; --k) cs[tp.begin + rng() % 64] ^= (uint8_t)(1u << (rng() % 8));
+            break;
+        }
+        case 4:  // cut short
+            cs.resize(1 + rng() % (cs.size() - 1));
+            break;
+        default:  // a run of 0xFF, which packet headers and the MQ decoder both treat specially
+        {
+            const size_t at = rng() % (cs.size() - 40);
+            std::fill(cs.begin() + (ptrdiff_t)at, cs.begin() + (ptrdiff_t)at + 1 + rng() % 32, (uint8_t)0xFF);
+            break;
+        }
+        }
+        // Exactly the size of the data, so that a read past the end is a read out of bounds
+        std::vector<uint8_t> exact(cs.begin(), cs.end());
+        StreamHeader h;
+        if (!parseCodestream(exact.data(), exact.size(), false, h, err)) {
+            ++malformed;
+            continue;
+        }
+        if (!h.supported) {
+            ++unsupported;
+            continue;
+        }
+        FrameLayout L;
+        try {
+            L = layoutFor(h);
+        } catch (const std::exception&) {
+            ++unsupported;
+            continue;
+        }
+        std::vector<CblkCode> b;
+        if (!parsePackets(exact.data(), h, L, L.levels, b, err)) {
+            ++badPackets;
+            continue;
+        }
+        int bad = 0;
+        for (const CblkCode& c : b) bad += c.passes && ((size_t)c.offset + c.len > exact.size() || c.nbps < 1 || c.passes > 3 * c.nbps - 2);
+        CHECK(bad == 0, "trial %d: %d code-blocks located outside the data or with impossible passes", trial, bad);
+        if (!sameGeometry(L, L0)) {  // the damage changed the picture's shape: its own slot
+            ++otherShape;
+            auto other = createCpuDecoderSlot(L, DecodeSettings{}, pool);
+            std::vector<uint16_t> o((size_t)L.width * L.height * 3);
+            other->decode(L, exact.data(), exact.size(), b, o.data(), (ptrdiff_t)L.width * 6, nullptr);
+            continue;
+        }
+        slot->decode(L, exact.data(), exact.size(), b, out.data(), (ptrdiff_t)L0.width * 6, nullptr);
+        ++decoded;
+    }
+    std::printf("  360 damaged frames: %d refused as malformed, %d as unsupported, %d with damaged packets, %d decoded to a picture "
+                "(%d of another shape)\n", malformed, unsupported, badPackets, decoded + otherShape, otherShape);
+    CHECK(malformed > 20 && badPackets > 5 && decoded > 20, "the damage did not reach every stage");
+    slot->decode(L0, f.cs.data(), f.cs.size(), blk, out.data(), (ptrdiff_t)L0.width * 6, nullptr);
+    CHECK(out == good, "the intact frame decodes differently after the damaged ones");
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1800,6 +1890,7 @@ int main(int argc, char** argv) {
     run("parse4k", [] { testParse(Profile::Cinema4K, Container::Scope); });
     run("decode2k", [] { testDecodeCpu(Profile::Cinema2K); });
     run("decode4k", [] { testDecodeCpu(Profile::Cinema4K); });
+    run("mutate", testDecodeMutations);
     run("dwt", testDwtRoundTrip);
     run("norms", testNorms);
     run("t1", testT1Truncation);
