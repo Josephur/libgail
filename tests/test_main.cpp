@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/backend.h"
+#include "core/bitio.h"
 #include "core/codestream_check.h"
 #include "core/dwt_cpu.h"
 #include "core/frame_source.h"
@@ -1240,6 +1241,56 @@ static void testRateLimits() {
           frames);
 }
 
+// Packet-header bits written by BitWriter come back from BitReader, including the 7-bit
+// bytes after 0xFF and the way a header ends.
+static void testBitIo() {
+    std::mt19937 rng(11);
+    size_t ffHeaders = 0, endOnFf = 0;
+    for (int trial = 0; trial < 2000; ++trial) {
+        std::vector<std::pair<uint32_t, int>> items;
+        const int count = trial == 0 ? 0 : 1 + (int)(rng() % 60);
+        const bool ones = trial % 3 == 0;  // long runs of ones produce 0xFF bytes
+        for (int i = 0; i < count; ++i) {
+            const int n = (int)(rng() % 33);
+            uint32_t v = ones && rng() % 4 ? 0xFFFFFFFFu : (uint32_t)rng();
+            if (n < 32) v &= (1u << n) - 1u;
+            items.push_back({v, n});
+        }
+        if (trial == 1) items = {{0xFFu, 8}};  // ends exactly on 0xFF
+        std::vector<uint8_t> bytes;
+        BitWriter bw(&bytes);
+        for (auto& it : items) {
+            if (it.second == 1) bw.putBit(it.first);
+            else bw.putBits(it.first, it.second);
+        }
+        const size_t written = bw.flush();
+        CHECK(written == bytes.size(), "writer count %zu vs %zu bytes", written, bytes.size());
+        for (size_t i = 0; i + 1 < bytes.size(); ++i)
+            if (bytes[i] == 0xFF) {
+                ++ffHeaders;
+                CHECK(bytes[i + 1] < 0x80, "trial %d: marker code inside a header", trial);
+            }
+        endOnFf += bytes.size() >= 2 && bytes[bytes.size() - 2] == 0xFF;
+        bytes.push_back(0xAA);  // the reader must not take what follows the header
+        BitReader br(bytes.data(), bytes.size());
+        bool same = true;
+        for (auto& it : items) {
+            const uint32_t v = it.second == 1 ? br.getBit() : br.getBits(it.second);
+            same = same && v == it.first;
+        }
+        CHECK(same, "trial %d: bits read back differ", trial);
+        const size_t used = br.finish();
+        CHECK(used == written, "trial %d: reader took %zu bytes, writer wrote %zu", trial, used, written);
+        CHECK(!br.overrun(), "trial %d: overrun on a complete header", trial);
+    }
+    CHECK(ffHeaders > 100 && endOnFf > 0, "test data never exercised bit stuffing (%zu, %zu)", ffHeaders, endOnFf);
+
+    const uint8_t three[3] = {0xA5, 0x0F, 0x33};
+    BitReader br(three, 3);
+    CHECK(br.getBits(24) == 0xA50F33u && !br.overrun(), "24 bits of 3 bytes");
+    CHECK(br.getBits(32) == 0 && br.overrun(), "bits past the end must read as zero and flag an overrun");
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1294,6 +1345,7 @@ int main(int argc, char** argv) {
         fn();
     };
     run("pool", testThreadPool);
+    run("bitio", testBitIo);
     run("dwt", testDwtRoundTrip);
     run("norms", testNorms);
     run("t1", testT1Truncation);

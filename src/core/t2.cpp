@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "core/bitio.h"
 #include "core/build_version.h"
 #include "core/markers.h"
 #include "kernels/portable.h"
@@ -13,54 +14,6 @@
 namespace gail {
 
 namespace {
-
-// Packet-header bit writer (B.10.1): bits fill each byte MSB first, and a byte that
-// follows 0xFF carries only 7 bits (its MSB is the stuffed 0), so no marker code can
-// appear in a header. With dst == nullptr it only counts bytes.
-class BitWriter {
-public:
-    explicit BitWriter(std::vector<uint8_t>* dst) : dst_(dst) {}
-    void putBit(uint32_t b) {
-        acc_ = (acc_ << 1) | (b & 1u);
-        if (++used_ == room_) emit(acc_);
-    }
-    // The n (0..32) low bits of v, MSB first, as many at a time as the current byte takes.
-    void putBits(uint32_t v, int n) {
-        while (n > 0) {
-            const int take = std::min(n, room_ - used_);
-            n -= take;
-            acc_ = (acc_ << take) | ((v >> n) & ((1u << take) - 1u));
-            used_ += take;
-            if (used_ == room_) emit(acc_);
-        }
-    }
-    void putZeros(int n) {
-        for (; n > 24; n -= 24) putBits(0, 24);
-        putBits(0, n);
-    }
-    // Pads the last byte with zeros. A header ending in 0xFF still owes the stuffed
-    // byte that must follow it, so that is written as 0x00. An empty header is one
-    // zero byte.
-    size_t flush() {
-        if (used_ > 0 || count_ == 0) emit(acc_ << (room_ - used_));
-        if (last_ == 0xFF) emit(0);
-        return count_;
-    }
-
-private:
-    void emit(uint32_t byte) {
-        last_ = byte & 0xFFu;
-        if (dst_) dst_->push_back((uint8_t)last_);
-        ++count_;
-        room_ = last_ == 0xFF ? 7 : 8;
-        acc_ = 0;
-        used_ = 0;
-    }
-    std::vector<uint8_t>* dst_;
-    uint32_t acc_ = 0, last_ = 0;
-    int used_ = 0, room_ = 8;
-    size_t count_ = 0;
-};
 
 class TagTree {
 public:
