@@ -212,6 +212,10 @@ if(GAIL_BUILD_TOOLS)
   add_executable(gail-check src/tools/gail_check.cpp)
   target_link_libraries(gail-check PRIVATE gail_core)
 
+  # the decoder's tool goes through the public API alone
+  add_executable(gail-dec src/tools/gail_dec.cpp)
+  target_link_libraries(gail-dec PRIVATE ${GAIL_LINK} Threads::Threads)
+
   add_executable(gail-bench src/tools/gail_bench.cpp)
   target_link_libraries(gail-bench PRIVATE gail_io ${GAIL_BACKEND_LIBS})
 endif()
@@ -243,7 +247,7 @@ install(EXPORT gailTargets NAMESPACE gail:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/
 file(WRITE ${CMAKE_BINARY_DIR}/gailConfig.cmake "include(\"\${CMAKE_CURRENT_LIST_DIR}/gailTargets.cmake\")\n")
 install(FILES ${CMAKE_BINARY_DIR}/gailConfig.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gail)
 if(GAIL_BUILD_TOOLS)
-  install(TARGETS gail-enc gail-check RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(TARGETS gail-enc gail-dec gail-check RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 # pkg-config: FFmpeg's configure finds the library this way
