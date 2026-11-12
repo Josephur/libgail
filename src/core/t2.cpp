@@ -7,6 +7,7 @@
 #include <string>
 
 #include "core/build_version.h"
+#include "core/markers.h"
 #include "kernels/portable.h"
 
 namespace gail {
@@ -248,8 +249,8 @@ void put32(std::vector<uint8_t>& v, uint32_t x) {
 void writeMainHeader(const FrameLayout& L, std::vector<uint8_t>& v, int ntp) {
     const bool fourk = L.profile == Profile::Cinema4K;
     const int nres = L.numRes();
-    put16(v, 0xFF4F);  // SOC
-    put16(v, 0xFF51);  // SIZ
+    put16(v, marker::SOC);
+    put16(v, marker::SIZ);
     put16(v, 38 + 3 * kNumComps);
     put16(v, fourk ? 4 : 3);  // Rsiz: CINEMA4K / CINEMA2K
     put32(v, L.width);
@@ -266,7 +267,7 @@ void writeMainHeader(const FrameLayout& L, std::vector<uint8_t>& v, int ntp) {
         v.push_back(1);
         v.push_back(1);
     }
-    put16(v, 0xFF52);  // COD
+    put16(v, marker::COD);
     put16(v, 12 + nres);
     v.push_back(0x01);  // Scod: user-defined precincts
     v.push_back(4);     // CPRL
@@ -278,13 +279,13 @@ void writeMainHeader(const FrameLayout& L, std::vector<uint8_t>& v, int ntp) {
     v.push_back(0);  // code-block style: no mode switches
     v.push_back(0);  // 9/7 irreversible
     for (int r = 0; r < nres; ++r) v.push_back(r == 0 ? 0x77 : 0x88);
-    put16(v, 0xFF5C);  // QCD
+    put16(v, marker::QCD);
     const int nb = L.bandsPerComp();
     put16(v, 3 + 2 * nb);
     v.push_back((uint8_t)((L.guardBits << 5) | 2));  // scalar expounded
     for (int i = 0; i < nb; ++i) put16(v, (uint32_t)((L.bands[i].eps << 11) | L.bands[i].mu));
     if (fourk) {
-        put16(v, 0xFF5F);  // POC: 2K resolutions first, then the 4K resolution
+        put16(v, marker::POC);  // POC: 2K resolutions first, then the 4K resolution
         put16(v, 2 + 7 * 2);
         const int NL = L.levels;
         const uint8_t e[2][7] = {{0, 0, 0, 1, (uint8_t)NL, 3, 4}, {(uint8_t)NL, 0, 0, 1, (uint8_t)(NL + 1), 3, 4}};
@@ -292,11 +293,11 @@ void writeMainHeader(const FrameLayout& L, std::vector<uint8_t>& v, int ntp) {
     }
     const char* label = codestreamLabel();
     const size_t labelLen = std::strlen(label);
-    put16(v, 0xFF64);  // COM
+    put16(v, marker::COM);
     put16(v, (uint32_t)(4 + labelLen));
     put16(v, 1);  // Rcom: Latin-1 text
     v.insert(v.end(), label, label + labelLen);
-    put16(v, 0xFF55);  // TLM (lengths patched later); buildCodestream relies on it being last
+    put16(v, marker::TLM);  // TLM (lengths patched later); buildCodestream relies on it being last
     put16(v, 4 + 5 * ntp);
     v.push_back(0);     // Ztlm
     v.push_back(0x50);  // Stlm: 8-bit Ttlm, 32-bit Ptlm
@@ -350,13 +351,13 @@ void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* 
             size_t sotPos = 0;
             if (out) {
                 sotPos = out->size();
-                put16(*out, 0xFF90);
+                put16(*out, marker::SOT);
                 put16(*out, 10);
                 put16(*out, 0);
                 put32(*out, 0);  // Psot patched below
                 out->push_back((uint8_t)tp);
                 out->push_back((uint8_t)ntp);
-                put16(*out, 0xFF93);
+                put16(*out, marker::SOD);
             }
             size_t tpBytes = 14;  // SOT (12) + SOD (2)
             for (int y = 0; y < L.height; y += ystep)
@@ -381,7 +382,7 @@ void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* 
         }
     }
     total += 2;
-    if (out) put16(*out, 0xFFD9);  // EOC
+    if (out) put16(*out, marker::EOC);
     sz.total = total;
     if (out && out->size() != total) throw std::logic_error("codestream size mismatch");
     if (sizes) *sizes = sz;

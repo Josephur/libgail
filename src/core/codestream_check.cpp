@@ -4,6 +4,8 @@
 #include <cmath>
 #include <sstream>
 
+#include "core/markers.h"
+
 namespace gail {
 
 namespace {
@@ -42,11 +44,11 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
     CheckReport r;
     r.totalBytes = size;
     Reader rd{data, data + size};
-    if (rd.u16() != 0xFF4F) {
+    if (rd.u16() != marker::SOC) {
         r.error("codestream does not start with SOC");
         return r;
     }
-    if (rd.u16() != 0xFF51) {
+    if (rd.u16() != marker::SIZ) {
         r.error("SIZ must immediately follow SOC");
         return r;
     }
@@ -103,7 +105,7 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             break;
         }
         switch (m) {
-        case 0xFF52: {  // COD
+        case marker::COD: {  // COD
             ++nCOD;
             if (!inMain) r.error("COD in tile-part header");
             const uint32_t len = rd.u16();
@@ -135,7 +137,7 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             rd.p = next;
             break;
         }
-        case 0xFF5C: {  // QCD
+        case marker::QCD: {  // QCD
             ++nQCD;
             const uint32_t len = rd.u16();
             const uint8_t* next = segment(m, mpos, len);
@@ -158,7 +160,7 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             rd.p = next;
             break;
         }
-        case 0xFF5F: {  // POC
+        case marker::POC: {  // POC
             if (inMain) ++nPOCmain;
             else ++nPOClate;
             const uint32_t len = rd.u16();
@@ -175,7 +177,7 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             rd.p = next;
             break;
         }
-        case 0xFF55: {  // TLM
+        case marker::TLM: {  // TLM
             r.tlm = true;
             const uint32_t len = rd.u16();
             const uint8_t* next = segment(m, mpos, len);
@@ -192,18 +194,18 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             rd.p = next;
             break;
         }
-        case 0xFF53: case 0xFF5D: case 0xFF64: {  // COC, QCC, COM
+        case marker::COC: case marker::QCC: case marker::COM: {
             const uint32_t len = rd.u16();
             const uint8_t* next = segment(m, mpos, len);
             if (!next) break;
             // Rcom = 1: Latin-1 text; the text is the len - 4 bytes up to `next` (in bounds)
-            if (m == 0xFF64 && len >= 4 && inMain && rd.p[0] == 0 && rd.p[1] == 1)
+            if (m == marker::COM && len >= 4 && inMain && rd.p[0] == 0 && rd.p[1] == 1)
                 r.comment.assign((const char*)rd.p + 2, len - 4);
             rd.p = next;
-            if (m == 0xFF53) r.warnings.push_back("COC marker present");
+            if (m == marker::COC) r.warnings.push_back("COC marker present");
             break;
         }
-        case 0xFF90: {  // SOT
+        case marker::SOT: {  // SOT
             inMain = false;
             const uint8_t* sot = rd.p - 2;
             const uint32_t lsot = rd.u16();
@@ -227,7 +229,7 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
                 rd.fail = true;
                 break;
             }
-            if (rd.u16() != 0xFF93) r.error("SOD must follow SOT");
+            if (rd.u16() != marker::SOD) r.error("SOD must follow SOT");
             // scan packet data for false markers
             for (const uint8_t* q = rd.p; q + 1 < sot + psot; ++q)
                 if (q[0] == 0xFF && q[1] >= 0x90) {
@@ -238,7 +240,7 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             rd.p = sot + psot;
             break;
         }
-        case 0xFFD9:
+        case marker::EOC:
             sawEOC = true;
             if (rd.p != rd.end) r.error("data after EOC");
             rd.p = rd.end;
