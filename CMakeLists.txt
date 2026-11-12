@@ -59,6 +59,8 @@ add_library(gail_core STATIC
   src/core/rate_control.cpp
   src/core/t2.cpp
   src/core/codestream_check.cpp
+  src/core/codestream_parse.cpp
+  src/core/t2_parse.cpp
   src/core/cpu_backend.cpp
   src/core/pipeline.cpp
 )

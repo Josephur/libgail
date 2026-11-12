@@ -168,9 +168,10 @@ FrameLayout makeGeometry(int width, int height, Profile profile, int levels, int
     return L;
 }
 
-void setSignaledSteps(FrameLayout& L, const int* eps, const int* mu) {
+void setSignaledSteps(FrameLayout& L, const int* eps, const int* mu, int comp) {
     const int nb = L.bandsPerComp();
     for (int bi = 0; bi < (int)L.bands.size(); ++bi) {
+        if (comp >= 0 && L.bands[bi].comp != comp) continue;
         const int i = bi % nb;
         if (eps[i] < 0 || eps[i] > 31 || mu[i] < 0 || mu[i] > 2047) throw std::runtime_error("quantization step out of range");
         applyStep(L.bands[bi], L.guardBits, eps[i], mu[i]);

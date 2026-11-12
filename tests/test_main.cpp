@@ -19,6 +19,7 @@
 #include "core/backend.h"
 #include "core/bitio.h"
 #include "core/codestream_check.h"
+#include "core/codestream_parse.h"
 #include "core/dwt_cpu.h"
 #include "core/frame_source.h"
 #include "core/pipeline.h"
@@ -27,6 +28,7 @@
 #include "core/rate_control.h"
 #include "core/t1_ref.h"
 #include "core/t2.h"
+#include "core/t2_parse.h"
 #include "core/tagtree.h"
 #include "core/thread_pool.h"
 
@@ -1462,6 +1464,116 @@ static void testGeometry() {
     CHECK(thrown, "a step with more bit-planes than the coder carries was accepted");
 }
 
+// One frame through the CPU reference encoder, with everything a decoder test wants to
+// compare against: the Tier-1 data, the passes rate control kept, the codestream, and the
+// X'Y'Z' picture that went in.
+struct EncodedFrame {
+    FrameLayout L;
+    Tier1Frame t1;
+    RateResult rr;
+    std::vector<uint8_t> cs;
+    std::vector<uint16_t> xyz12;
+};
+static EncodedFrame encodeCpuFrame(Profile prof, Container cont = Container::Flat, int patternSeed = 3) {
+    EncodedFrame f;
+    int W, H;
+    containerSize(prof, cont, W, H);
+    f.L = makeLayout(W, H, prof, 1.0);
+    auto src = openPatternSource(W, H, 1, patternSeed);
+    std::vector<uint16_t> rgb((size_t)W * H * 3);
+    src->read(rgb.data());
+    EncodeSettings es;
+    es.profile = prof;
+    es.width = W;
+    es.height = H;
+    es.input = src->format();
+    auto dev = createCpuDevice(0);
+    auto slot = dev->createSlot(f.L, es);
+    FrameTimings tm;
+    FrameDebug dbg;
+    slot->encode(rgb.data(), f.t1, &tm, &dbg);
+    f.rr = allocateRate(f.L, f.t1, dciLimits(24));
+    buildCodestream(f.L, f.t1, f.rr.passes.data(), &f.cs, nullptr);
+    f.xyz12 = std::move(dbg.xyz12);
+    return f;
+}
+
+// The headers of an encoded frame say what the encoder's layout says, and reading its
+// packets gives back, for every code-block, exactly the passes and bytes that were written.
+static void testParse(Profile prof, Container cont) {
+    const EncodedFrame f = encodeCpuFrame(prof, cont);
+    const FrameLayout& L = f.L;
+    StreamHeader h;
+    std::string err;
+    CHECK(parseCodestream(f.cs.data(), f.cs.size(), false, h, err), "parse failed: %s", err.c_str());
+    CHECK(h.supported, "own codestream reported unsupported: %s", h.unsupported.c_str());
+    CHECK(h.width == L.width && h.height == L.height && h.components == 3 && h.bitDepth == 12, "SIZ: %dx%d, %d components, %d bits",
+          h.width, h.height, h.components, h.bitDepth);
+    CHECK(h.rsiz == (prof == Profile::Cinema4K ? 4 : 3) && h.levels == L.levels && h.layers == 1 && h.guardBits == L.guardBits,
+          "Rsiz %d, %d levels, %d layers, %d guard bits", h.rsiz, h.levels, h.layers, h.guardBits);
+    CHECK(!h.reversible && !h.highThroughput && !h.sop && !h.eph && h.tiles == 1, "coding style flags wrong");
+    ProgressionVolume vols[2];
+    const int nv = progressionVolumes(L, vols);
+    bool volsSame = (int)h.volumes.size() == nv;
+    for (int i = 0; volsSame && i < nv; ++i) volsSame = h.volumes[i].rs == vols[i].rs && h.volumes[i].re == vols[i].re;
+    CHECK(volsSame, "progression volumes differ from the writer's");
+    CHECK((int)h.tileParts.size() == nv * 3, "%zu tile-parts", h.tileParts.size());
+
+    StreamHeader ho;
+    CHECK(parseCodestream(f.cs.data(), f.cs.size(), true, ho, err) && ho.supported && ho.tileParts.empty() && ho.width == h.width,
+          "header-only parse");
+
+    const FrameLayout G = layoutFor(h);
+    bool bandsSame = G.bands.size() == L.bands.size() && G.numCblks() == L.numCblks();
+    for (size_t i = 0; bandsSame && i < L.bands.size(); ++i)
+        bandsSame = G.bands[i].eps == L.bands[i].eps && G.bands[i].mu == L.bands[i].mu && G.bands[i].Mb == L.bands[i].Mb &&
+                    G.bands[i].delta == L.bands[i].delta && G.bands[i].cblkBase == L.bands[i].cblkBase;
+    CHECK(bandsSame, "layout from the headers differs from the encoder's");
+
+    std::vector<CblkCode> blk;
+    CHECK(parsePackets(f.cs.data(), h, G, L.levels, blk, err), "packet parse failed: %s", err.c_str());
+    int wrong = 0, coded = 0;
+    for (int i = 0; i < L.numCblks(); ++i) {
+        const int np = f.rr.passes[i];
+        const CblkCode& b = blk[i];
+        if (b.passes != np) {
+            ++wrong;
+            continue;
+        }
+        if (!np) continue;
+        ++coded;
+        const uint32_t len = f.t1.len(i, np - 1);
+        if (b.nbps != f.t1.info[i].nbps || b.len != len || (size_t)b.offset + len > f.cs.size() ||
+            std::memcmp(f.cs.data() + b.offset, f.t1.data.data() + f.t1.info[i].dataOffset, len) != 0)
+            ++wrong;
+    }
+    std::printf("  %s %dx%d: %d of %d code-blocks coded, %zu bytes\n", profileName(prof), L.width, L.height, coded,
+                L.numCblks(), f.cs.size());
+    CHECK(wrong == 0 && coded > 0, "%d code-blocks read back differently from what was written", wrong);
+
+    // Stopping one resolution early: the same answer below it, nothing above
+    std::vector<CblkCode> low;
+    CHECK(parsePackets(f.cs.data(), h, G, L.levels - 1, low, err), "reduced packet parse failed: %s", err.c_str());
+    wrong = 0;
+    for (int i = 0; i < L.numCblks(); ++i) {
+        const bool top = L.bands[L.cblks[i].band].res == L.levels;
+        wrong += top ? low[i].passes != 0 : low[i].passes != blk[i].passes || low[i].offset != blk[i].offset || low[i].len != blk[i].len;
+    }
+    CHECK(wrong == 0, "%d code-blocks wrong when the top resolution is skipped", wrong);
+
+    // Every way of cutting the codestream short is an error or a clean parse, never a crash
+    int accepted = 0;
+    for (size_t n = 0; n < f.cs.size(); n += n < 400 ? 1 : 997) {
+        StreamHeader t;
+        std::string e;
+        if (!parseCodestream(f.cs.data(), n, false, t, e)) continue;
+        ++accepted;
+        std::vector<CblkCode> tb;
+        if (t.supported) parsePackets(f.cs.data(), t, G, L.levels, tb, e);
+    }
+    CHECK(accepted == 0, "%d truncated codestreams parsed as complete", accepted);
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1520,6 +1632,8 @@ int main(int argc, char** argv) {
     run("tagtree", testTagTree);
     run("progression", testProgression);
     run("geometry", testGeometry);
+    run("parse2k", [] { testParse(Profile::Cinema2K, Container::Flat); });
+    run("parse4k", [] { testParse(Profile::Cinema4K, Container::Scope); });
     run("dwt", testDwtRoundTrip);
     run("norms", testNorms);
     run("t1", testT1Truncation);

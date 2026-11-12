@@ -90,9 +90,9 @@ FrameLayout makeLayout(int width, int height, Profile profile, double baseStep);
 // code-blocks and precincts, with no step sizes. makeLayout() is this with the profile's
 // decomposition levels and guard bits, plus step sizes chosen from baseStep.
 FrameLayout makeGeometry(int width, int height, Profile profile, int levels, int guardBits);
-// Step sizes exactly as a QCD marker signals them: eps[i], mu[i] for band i of one
-// component, the same for every component.
-void setSignaledSteps(FrameLayout& L, const int* eps, const int* mu);
+// Step sizes exactly as a QCD or QCC marker signals them: eps[i], mu[i] for band i of one
+// component, applied to component comp or (comp < 0) to every component.
+void setSignaledSteps(FrameLayout& L, const int* eps, const int* mu, int comp = -1);
 
 // L2 norm of the synthesis basis function of a subband (standard 9/7 normalization).
 double synthesisNorm(int level, int orient);
