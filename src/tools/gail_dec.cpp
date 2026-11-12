@@ -205,6 +205,14 @@ int main(int argc, char** argv) {
         if (!out) writeError = true;
     };
 
+    // The first codestream sets the devices up (GPU programs, buffers): once, before the clock
+    {
+        gail_packet pkt{};
+        pkt.data = streams[0].data();
+        pkt.size = streams[0].size();
+        gail_image warm{};
+        if (gail_decoder_decode(dec, &pkt, &warm) == GAIL_OK) gail_image_free(&warm);
+    }
     const auto t0 = std::chrono::steady_clock::now();
     int status = GAIL_OK;
     for (int loop = 0; loop < loops && status == GAIL_OK; ++loop)
