@@ -8,7 +8,7 @@ foreach(part MAJOR MINOR PATCH)
   set(GAIL_VERSION_${part} ${CMAKE_MATCH_1})
 endforeach()
 project(gail VERSION ${GAIL_VERSION_MAJOR}.${GAIL_VERSION_MINOR}.${GAIL_VERSION_PATCH} LANGUAGES C CXX
-        DESCRIPTION "GAIL, GPU Accelerated Intraframe Library: a DCI JPEG 2000 encoder")
+        DESCRIPTION "GAIL, GPU Accelerated Intraframe Library: a DCI JPEG 2000 encoder and decoder")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

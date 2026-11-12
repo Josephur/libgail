@@ -95,3 +95,60 @@ better with or without a neighbor (`GAIL_VK_QUEUES=1`).
   much (quantized coefficients differ in 58 % / 73 % of the finest-band positions); plain
   TF32 still differs in 22 %, and the 3×TF32 split that recovers FP32-class accuracy costs
   4× the time.
+
+## Decoding
+
+Machine as above, NVIDIA driver 620.70. Content: 48 frames from 15 s into a 30 s DCP made
+by DCP-o-matic at 250 Mbit/s and 24 fps (the frames average 245 Mbit/s; a DCP of the same
+clip made by GAIL decodes at the same rates), preloaded and looped 10×, 3 frames in flight
+per GPU, pictures returned in host memory as `xyz12le`. The first frame, which sets the
+devices up, is decoded before the clock starts.
+
+```bash
+./build/gail-dec -i frames/ --loops 10 --backend cuda
+```
+
+| Profile | Backend | RTX 3090 | RTX 5060 Ti | both |
+|---|---|---:|---:|---:|
+| 4K 3996×2160 | CUDA   | 121.4 | 57.3 | 160.0 |
+| 4K 3996×2160 | Vulkan | 100.7 | 51.9 | 148.7 |
+| 2K 1998×1080 | CUDA   | 189.5 | 92.2 | 252.7 |
+| 2K 1998×1080 | Vulkan | 155.2 | 84.9 | 236.9 |
+| 4K at half size (`--reduce 1`) | CUDA | | | 301.4 |
+| 2K at half size (`--reduce 1`) | CUDA | | | 566.6 |
+| 4K           | CPU, 24 threads | | | 15 to 22 |
+| 2K           | CPU, 24 threads | | | 29 to 43 |
+
+Each GPU figure is the median of three runs. Other work was running on the machine during
+all of them, taking between a third and all of its cores, so the figures are on the low
+side; the CPU rows are given as the range seen across sessions for that reason.
+
+For scale, FFmpeg 9.0.2's own `jpeg2000` decoder (16 frame threads) on the same track
+files and the same machine decodes 13.4 to 17.6 fps at 4K and 30.7 to 44 fps at 2K, the
+spread again being what else the machine was doing. Run back to back with GAIL's CPU
+backend under the same load, it gave 13.4 fps at 4K against GAIL's 17.9, and 32 fps at
+2K against 34. OpenJPEG 2.5.4 decodes a 4K frame in about 340 ms on one thread.
+
+Through FFmpeg with the `libgail` decoder (`ffmpeg -c:v libgail -i picture.mxf -f null -`,
+both GPUs, the whole 724-frame track including the MXF demuxer): 121 to 137 fps at 4K and
+273 to 289 fps at 2K, against 16.5 and 43 fps with `-c:v jpeg2000`. CPU time for the 4K
+track: 14 s with `libgail`; the `jpeg2000` decoder used 177 s for a third of it.
+
+### Per-frame stage times, 4K, CUDA, one frame in flight
+
+| Stage | RTX 3090 | RTX 5060 Ti |
+|---|---:|---:|
+| upload, Tier-1 and dequantization | 4.0 ms | 9.3 ms |
+| inverse wavelet (6 levels, 3 planes) | 0.8 ms | 1.4 ms |
+| inverse ICT, packing and download | 4.0 ms | 8.4 ms |
+| whole frame, wall clock, with header and packet parsing on the host | 14.7 ms | 25.2 ms |
+
+These are for a test-pattern frame at the 250 Mbit/s limit.
+
+### What made the difference
+
+| Change | Effect |
+|---|---|
+| Code-blocks packed into warps by a byte budget (long blocks alone, short ones together) in place of 32 blocks per warp sorted by length | Tier-1 for a 4K frame 11.9 → 3.8 ms on the RTX 3090, 10.5 → 6.5 ms on the RTX 5060 Ti |
+| Picture buffers reused in place of a fresh 52 MB allocation per 4K picture | 4K on the RTX 3090 with 3 frames in flight: 61 → 121 fps |
+| More frames in flight (the default is 3 per GPU) | RTX 3090 at 4K: 1 / 3 / 6 frames give 46 / 116 / 149 fps |

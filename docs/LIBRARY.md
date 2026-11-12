@@ -1,14 +1,15 @@
 # Using GAIL as a library
 
-`libgail` is GAIL's encoder as a C library: one header, [include/gail/gail.h](../include/gail/gail.h),
+`libgail` is GAIL's encoder and decoder as a C library: one header, [include/gail/gail.h](../include/gail/gail.h),
 and `libgail.so` (Linux), `libgail.dll` (Windows), `libgail.dylib` (macOS), or the static
-`libgail.a`. Every packet it
+`libgail.a`. Every packet the encoder
 returns is a complete, DCI-compliant JPEG 2000 codestream (SMPTE ST 428-1 / ST 429-4), ready
-to wrap into a DCP.
+to wrap into a DCP; the decoder turns such codestreams back into X'Y'Z' pictures
+([Decoding](#decoding)).
 
 Ready-made integrations:
 
-* **FFmpeg:** a `libgail` encoder; see [integrations/ffmpeg](../integrations/ffmpeg/README.md).
+* **FFmpeg:** a `libgail` encoder and decoder; see [integrations/ffmpeg](../integrations/ffmpeg/README.md).
 
 ## Supported hardware
 
@@ -146,10 +147,11 @@ request:
 | Job | Runner | Builds | Tests |
 |---|---|---|---|
 | `linux` | Ubuntu 24.04, GCC | CUDA + Vulkan + CPU | both suites; install, then a program built against the installed library through pkg-config |
+| `sanitize` | Ubuntu 24.04, GCC with AddressSanitizer and UndefinedBehaviorSanitizer | CPU | the decoder's tests, damaged codestreams among them, and the API test |
 | `windows-msvc` | Windows Server 2022, MSVC | CUDA + Vulkan + CPU | both suites; install |
 | `windows-mingw` | Ubuntu 24.04, MinGW-w64 cross | Vulkan + CPU | both suites under Wine |
 | `macos` | macOS 15, Apple clang (arm64) | CPU | both suites; install, then a pkg-config consumer |
-| `ffmpeg` | Ubuntu 24.04 | FFmpeg with the `libgail` encoder | encodes a test pattern; `gail-check` verifies it |
+| `ffmpeg` | Ubuntu 24.04 | FFmpeg with the `libgail` encoder and decoder | encodes a test pattern, which `gail-check` verifies; decodes it again and compares with FFmpeg's own decoder |
 
 * **No GPU on the runners:** the CUDA and Vulkan backends are compiled in every job, but
   tests run on the CPU backend, and the GPU tests skip themselves. GPU coverage comes from
@@ -202,6 +204,9 @@ on Linux. `gail_version()` reports the version actually loaded. Within version 1
   `gail_frame f = {0}`. The encoder rejects non-zero reserved words.
 * Bindings for other languages call `gail_config_init(&cfg, sizeof cfg)`, the exported
   function behind `gail_config_defaults()`.
+* `gail_decoder_config` follows the same rules as `gail_config`, with
+  `gail_decoder_config_defaults()` / `gail_decoder_config_init()`; `gail_packet` and
+  `gail_image` handed to the decoder have their `reserved` words zero.
 
 `gail_encoder_cancel()` stops an encode at once (a Cancel button): blocked calls return
 `GAIL_ERROR_CANCELLED` and destroying the encoder then only waits for the frames on the
@@ -320,10 +325,77 @@ FFmpeg's `…le` formats.
   library warns, because the bitrate is shared over more frames.
 * **3D:** `config.stereo` gives each eye half the frame budget, as DCI requires.
 
+## Decoding
+
+A `gail_decoder` takes DCI JPEG 2000 codestreams, one per frame, as a DCP's picture track
+file holds them (the caller unwraps the MXF, and decrypts it if it is encrypted), and
+returns pictures. It uses the same backends and devices as the encoder, chosen the same
+way (`backend`, `devices` / `device_ids`, `frames_in_flight`, `cpu_threads`,
+`low_priority`, `log` in `gail_decoder_config`), with the same hardware requirements.
+
+| | How | Typical caller |
+|---|---|---|
+| Pull | `gail_decoder_send()` codestreams; `gail_decoder_receive()` images in order; `send(NULL, NULL)` ends; receive until `GAIL_EOF` | FFmpeg-style decoders, players |
+| Callback | `config.on_image`, called in order from a decoder thread; `gail_decoder_finish()` | players with their own display queue |
+| Blocking | `gail_decoder_decode()` from any number of threads; each gets its own picture | apps with their own pool of worker threads |
+
+* **What it decodes:** DCI streams: Rsiz 3 or 4, three 12-bit components, one tile, the
+  9/7 wavelet, 32×32 code-blocks, one quality layer; GAIL's own and other encoders'.
+  `gail_probe()` reads a codestream's main header and reports its size, levels and whether
+  it is supported, with the reason in `gail_last_error()` when it is not. Lossless (5/3)
+  streams, other bit depths, several tiles or layers and HTJ2K are recognized and refused.
+* **Size:** the decoder takes the picture size from the first codestream. A later one of
+  another size or with another number of wavelet levels fails with
+  `GAIL_ERROR_UNSUPPORTED`; it needs a decoder of its own.
+* **Output:** three 16-bit words per pixel, X', Y', Z'. `GAIL_PIX_XYZ12_MSB` (the default)
+  has the 12-bit codes in the high bits: FFmpeg's `xyz12le`, what FFmpeg's JPEG 2000
+  decoder returns and what players' display code expects, so converting for a monitor and
+  scaling work downstream as they do today. `GAIL_PIX_XYZ12` has them in the low bits, the
+  layout the encoder takes.
+* **Whose buffer:** by default the library allocates the picture and `gail_image_free()`
+  releases it (the buffers are reused, so release them and do not keep hundreds). Or the
+  caller names its own buffer in `data[0]` with its row length in `stride[0]` (bytes, at
+  least 6 × width, any alignment; bytes of a row past the picture are not written) and the
+  picture is decoded straight into it: no copy, which is how the FFmpeg decoder fills
+  FFmpeg's frames. A buffer handed to `gail_decoder_send()` must stay valid until its image
+  has been received, or `gail_decoder_flush()` or `gail_decoder_destroy()` has returned.
+* **Reduced size:** `config.reduce = 1` decodes at half size, `2` at a quarter (rounded
+  up), by leaving out wavelet levels: much less work, for previews or a 2K display of a 4K
+  track.
+* **Errors:** codestreams are untrusted input. One that is damaged or unsupported fails on
+  its own: `gail_decoder_decode()` returns the status, and in pull or callback mode the
+  image arrives in its place in the order with a negative `status` and no picture, with
+  the reason in `gail_last_error()`. The decoder carries on. `gail_decoder_error()` is
+  only set when a device fails.
+* **Seeking:** `gail_decoder_flush()` drops what was sent and not yet received.
+  `gail_decoder_cancel()` stops everything at once.
+* **Device memory:** a frame in flight takes about 0.26 GB (4K) or 0.07 GB (2K) on a GPU.
+  A device that cannot hold the requested number runs fewer, with a warning.
+* **Agreement between backends:** the CUDA and Vulkan decoders reproduce the CPU decoder's
+  coefficients exactly and its pictures to within one code value (the inverse wavelet is
+  float arithmetic and rounds differently on a GPU).
+
+```c
+gail_decoder_config cfg;
+gail_decoder_config_defaults(&cfg);
+gail_decoder* dec;
+if (gail_decoder_create(&cfg, &dec) != GAIL_OK) { puts(gail_last_error()); return 1; }
+for (each codestream) {
+    gail_packet pkt = {0};
+    pkt.data = codestream;
+    pkt.size = size;
+    gail_image img = {0};
+    if (gail_decoder_decode(dec, &pkt, &img) != GAIL_OK) { puts(gail_last_error()); continue; }
+    show(img.data[0], img.stride[0], img.width, img.height);  /* xyz12le */
+    gail_image_free(&img);
+}
+gail_decoder_destroy(dec);
+```
+
 ## Example
 
 [tests/test_api.c](../tests/test_api.c) exercises every mode and format and is the
-reference example. The shortest complete use:
+reference example. The shortest complete use of the encoder:
 
 ```c
 #include <gail/gail.h>

@@ -6,6 +6,44 @@ tagged `vX.Y.Z` and published with prebuilt archives on the
 release is binary compatible with the ones before it (see
 [docs/LIBRARY.md](docs/LIBRARY.md#compatibility)).
 
+## Unreleased
+
+A decoder. Everything the 1.0 header declared is unchanged, and the encoder writes the
+same codestreams as 1.0.1 for the same input and settings.
+
+### Library
+
+* `gail_decoder`: DCI JPEG 2000 codestreams (2K and 4K, GAIL's own and other encoders')
+  back to 12-bit X'Y'Z' pictures, on CUDA, Vulkan or the CPU. The same three calling
+  patterns as the encoder: `gail_decoder_send()` / `gail_decoder_receive()`, the
+  `on_image` callback, or `gail_decoder_decode()` from any number of threads.
+* Output with the codes in the high bits of each word (`GAIL_PIX_XYZ12_MSB`, FFmpeg's
+  `xyz12le`, the default) or the low bits, into the library's buffer or straight into the
+  caller's with the caller's row length.
+* `gail_decoder_config.reduce` leaves out resolution levels: half size, quarter size.
+* `gail_probe()` reads a codestream's header and says what it is and whether it can be
+  decoded here.
+* Codestreams are untrusted input. A damaged or unsupported one fails on its own, with
+  the reason in `gail_last_error()`, and the decoder carries on with the next.
+* JPEG 2000 outside the DCI profiles (5/3 lossless, other bit depths or component counts,
+  several tiles or quality layers, HTJ2K) is recognized and refused, not decoded.
+
+### Tools
+
+* `gail-dec` decodes a codestream or a directory of them to raw X'Y'Z' frames, times the
+  decode when no output is asked for, and with `--info` prints what each codestream is.
+
+### FFmpeg
+
+* A `libgail` decoder next to the encoder (`integrations/ffmpeg/libgaildec.c`), added by the
+  same `add-to-ffmpeg.sh`. It is selected by name (`-c:v libgail` before the input),
+  decodes into FFmpeg's own frame buffers and supports `-lowres`.
+
+### Other
+
+* Prose, comments and messages use American English spelling throughout; the status
+  text of `GAIL_ERROR_CANCELLED` is now "canceled". No name in the API changed.
+
 ## 1.0.1 — 2026-11-05
 
 Bug-fix release, a drop-in replacement for 1.0.0 (same header, same symbols, same

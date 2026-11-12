@@ -176,3 +176,74 @@ component (and by POC for 4K) and back-patches TLM and Psot.
 * Capacity overflows (pathological content exceeding the symbol / codeword buffers) are
   detected on the GPU and the frame's Tier-1 is redone on the CPU from the GPU's
   coefficients, so output stays exact.
+
+## Decoder
+
+```
+codestream ──► CPU (per frame): headers ─► packet headers (tag trees, CPRL / POC) ─► where each code-block's bytes are
+                                                                                        │
+GPU: codestream + block table ─► Tier-1 + dequantize ─► inverse 9/7 DWT ─► inverse ICT + shift + pack ─► picture
+        (one upload)              (one thread per       (rows, then        (12-bit codes, 3 words     (host memory,
+                                   code-block)           columns, per level) per pixel)                 caller's or pooled)
+```
+
+The decoder shares what it can with the encoder: the marker codes, the packet-header bit
+I/O and tag trees (each with its reading half next to its writing half), one iterator for
+the packet order that both the writer and the reader walk, the frame geometry, the MQ
+probability table and the context formation, the wavelet and ICT constants, the thread
+pool, and the device classes, which make encoder slots and decoder slots alike.
+
+**Host side.** The main header is read first; a stream outside the DCI profiles is refused
+there, with the reason. Then the packet headers are read, which gives for every code-block
+its number of bit-planes and coding passes and the position of its bytes in the
+codestream. Nothing is copied: the block table points into the codestream, and the whole
+codestream goes to the device in one upload.
+
+**Tier-1.** In the encoder, context modeling is spread over a warp because the samples of
+a stripe column can be classified together. That does not carry over: when decoding, each
+decoded bit decides the context of the next, so a code-block is strictly serial. The
+parallelism is across blocks, one GPU thread per block (about 26,000 in a 4K frame, of
+which two thirds to four fifths are empty at DCI rates and cost nothing). A block's state
+is four sets of 32-bit row masks (significant, sign, coded in this plane's first pass,
+refined before), with a stripe of four rows and its two neighbors in registers, and the
+contexts come from two small tables indexed by neighborhood bits. The source
+(`kernels/t1_decode.h`, with `kernels/mq_decoder.h`) is shared by CUDA and GLSL and is
+compiled for the host by the tests. The MQ decoder returns after one context read for the
+common case and has a single path for the rest, shifting several bits at a time.
+
+A warp runs as long as its longest thread, and a GPU thread is slow at this serial work, so
+how blocks are grouped matters more than anything else. Sorting blocks by length, which
+puts the long ones side by side, is the slowest arrangement. Instead the blocks, longest
+first, fill each warp up to a byte budget: a long block gets a warp to itself and short
+blocks share (11.9 → 3.8 ms for a 4K frame on an RTX 3090). A GPU with many
+multiprocessors does best with a small budget, one with fewer with a larger one. What
+remains is the longest block of the frame, some 2 ms on its own, during which the GPU is
+mostly idle: frames in flight overlap there, as the encoder's do behind its MQ tail.
+
+Each thread writes its decoded words straight to the block's place in the wavelet plane
+and then turns them into coefficients there, so there is no intermediate coefficient
+buffer. A decoded word is the sign, twice the magnitude, and the mid-point of the
+bit-planes that were not decoded (E.1.1.2): a refinement bit moves it by 2^p either way.
+
+**Inverse wavelet and color.** The encoder's row and column kernels run backwards, level
+by level from the smallest, rows then columns. With `reduce` the top levels are left out
+and their code-blocks are never decoded; in a 4K stream they sit in tile-parts of their
+own, whose packets are not even read. The inverse ICT, the level shift and the clamp to 12
+bits write three words per pixel.
+
+**Agreement between backends.** Tier-1 and dequantization are integer work plus one float
+multiplication, and are bit-identical on the CPU, CUDA and Vulkan. The inverse wavelet is
+float arithmetic that the GPU compilers contract and reorder, so pictures agree to within
+one code value, as different JPEG 2000 decoders do among themselves.
+
+**Untrusted input.** Every read from a codestream is bounded by the data, every marker
+segment by its length, every packet by its tile-part. The block table is checked before
+it reaches a device, and the kernels check it again. An MQ decoder that runs off the end
+of its bytes is fed 0xFF, as the standard specifies (C.3.4), and decodes garbage for that
+block without reading or writing anywhere else. A damaged frame is refused or decodes to
+a damaged picture; either way the next frame is unaffected.
+
+**Picture buffers.** A 4K picture is 52 MB. Taking that from the system for every frame,
+and returning it, cost more than decoding the frame, so released pictures go back to a
+pool the decoder hands out from.
+

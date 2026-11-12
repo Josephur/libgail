@@ -4,11 +4,12 @@
 
 # GAIL — GPU Accelerated Intraframe Library
 
-A DCI JPEG 2000 encoder. GAIL turns video into **DCI-compliant JPEG 2000 codestreams** (ISO/IEC 15444-1 with the
+A DCI JPEG 2000 encoder and decoder. GAIL turns video into **DCI-compliant JPEG 2000 codestreams** (ISO/IEC 15444-1 with the
 Amd.1 cinema profiles, SMPTE ST 428-1 / ST 429-4) using the GPU for every compute-heavy
-stage, including **EBCOT Tier-1 entropy coding**. Output frames are ready for MXF wrapping
-and DCP packaging (`scripts/make_dcp.py` does both with asdcplib), and every frame is
-verified by an independent checker.
+stage, including **EBCOT Tier-1 entropy coding**, and decodes such codestreams back to
+pictures the same way, several times faster than real time at 4K. Encoded frames are ready
+for MXF wrapping and DCP packaging (`scripts/make_dcp.py` does both with asdcplib), and
+every frame is verified by an independent checker.
 
 * **Backends:** Vulkan compute (portable: NVIDIA / AMD / Intel; needs 32-wide subgroups),
   CUDA (optional, fastest on NVIDIA; Turing / GTX 16 and newer with driver 580+), CPU
@@ -30,9 +31,14 @@ verified by an independent checker.
   encoding, R'G'B' / Y'CbCr / X'Y'Z' input, pkg-config and CMake packages. Linux and Windows
   (MinGW-w64, and MSVC with CUDA) with GPUs; macOS CPU-only so far. See
   [docs/LIBRARY.md](docs/LIBRARY.md).
-* **Works in FFmpeg:** a `-c:v libgail` encoder for FFmpeg
-  ([integrations/ffmpeg](integrations/ffmpeg/README.md)), up to 17× faster than FFmpeg's
-  OpenJPEG encoder at 4K, with output that is actually DCI-compliant.
+* **Decoder:** DCI 2K and 4K codestreams (GAIL's own and other encoders') to 12-bit
+  X'Y'Z' pictures on CUDA, Vulkan or the CPU, at full, half or quarter size. The picture
+  is within one code value of what the OpenJPEG and FFmpeg decoders give. Codestreams are
+  treated as untrusted input: a damaged frame fails on its own.
+* **Works in FFmpeg:** a `-c:v libgail` encoder and decoder for FFmpeg
+  ([integrations/ffmpeg](integrations/ffmpeg/README.md)): encoding up to 17× faster than
+  FFmpeg's OpenJPEG encoder at 4K, with output that is actually DCI-compliant, and
+  decoding a 4K DCP several times faster than FFmpeg's own JPEG 2000 decoder.
 
 ## Results
 
@@ -65,6 +71,25 @@ property verified), OpenJPEG and FFmpeg decoders (agree to 90 dB; PSNR mean 55.9
 65.3 dB at 2K), SMPTE MXF wrapping with asdcp-wrap, libdcp `dcpverify` on the resulting
 DCP (no notes; "every frame safely under 250 Mbit/s") and DCP-o-matic's verifier
 (0 errors, 0 Bv2.1 errors, 0 warnings).
+
+Decoder throughput on 4K and 2K DCP picture tracks at 250 Mbit/s (made by DCP-o-matic),
+frames preloaded (`gail-dec`), frames per second, with FFmpeg's own decoder on the same
+machine for scale:
+
+| Profile | Decoder | RTX 3090 | RTX 5060 Ti | both GPUs |
+|---|---|---:|---:|---:|
+| 4K 3996×2160 | GAIL, CUDA   | 121 | 57 | **160** |
+| 4K 3996×2160 | GAIL, Vulkan | 101 | 52 | 149 |
+| 2K 1998×1080 | GAIL, CUDA   | 190 | 92 | **253** |
+| 2K 1998×1080 | GAIL, Vulkan | 155 | 85 | 237 |
+| 4K / 2K      | GAIL, CPU (24 threads) | | | 15 to 22 / 29 to 43 |
+| 4K / 2K      | FFmpeg `jpeg2000` (24 threads) | | | 13 to 18 / 31 to 44 |
+
+The two CPU rows are ranges because they move with whatever else the machine is doing;
+the GPU rows barely do. A 4K track decodes at 301 fps at half size on both GPUs
+(`--reduce 1`). Through FFmpeg with `-c:v libgail`, a whole 30 s 4K track decodes at 121
+to 137 fps. Method and per-stage times are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md#decoding).
 
 Playback of GAIL-encoded 4K DCPs has been tested on Christie Solaria One, CP2210 and CP2220
 and NEC NC900C-A projectors, a GDC SR-1000 media block and ScreenWriter Plus 2.7.5-1983
@@ -119,6 +144,20 @@ Color (see [docs/COLOR.md](docs/COLOR.md)): `--tonemap signal|shoulder|bt2390|no
 cd/m² by default), `--knee F`, `--cinema-peak N`, `--sdr-white N`, `--gamut none|p3d65|dcip3`,
 `--gamut-threshold F`, `--lut3d FILE.cube`.
 
+Decode codestreams (a directory of `.j2c` files, in name order) to raw X'Y'Z' frames,
+or just time the decode:
+
+```bash
+./build/gail-dec -i frames/ -o pictures/
+```
+
+```bash
+./build/gail-dec -i frames/ --reduce 1
+```
+
+`gail-dec --help` lists the rest (`--info`, `--low-bits`, `--backend`, `--gpus`,
+`--slots`, `--threads`, `--loops`).
+
 Apps link `libgail` (`pkg-config gail`) and include `<gail/gail.h>`; see
 [docs/LIBRARY.md](docs/LIBRARY.md) and the complete example in `tests/test_api.c`:
 
@@ -134,10 +173,28 @@ if (gail_encoder_encode(enc, &f, &pkt) == GAIL_OK) { fwrite(pkt.data, 1, pkt.siz
 gail_encoder_destroy(enc);
 ```
 
-FFmpeg with the `libgail` encoder ([integrations/ffmpeg](integrations/ffmpeg/README.md)):
+Decoding is the same in reverse, one codestream in and one picture out:
+
+```c
+gail_decoder_config dcfg;
+gail_decoder_config_defaults(&dcfg);
+gail_decoder* dec;
+if (gail_decoder_create(&dcfg, &dec) != GAIL_OK) puts(gail_last_error());
+gail_packet in = {0};
+in.data = codestream; in.size = size;
+gail_image img = {0};
+if (gail_decoder_decode(dec, &in, &img) == GAIL_OK) { show(img.data[0], img.stride[0], img.width, img.height); gail_image_free(&img); }
+gail_decoder_destroy(dec);
+```
+
+FFmpeg with the `libgail` encoder and decoder ([integrations/ffmpeg](integrations/ffmpeg/README.md)):
 
 ```bash
 ffmpeg -i film.mkv -r 24 -vf scale=1920:1080 -c:v libgail -f image2 j2c/%06d.j2c
+```
+
+```bash
+ffmpeg -c:v libgail -i picture.mxf -pix_fmt rgb48le pictures/%06d.tiff
 ```
 
 Wrap the frames and build a SMPTE DCP, then verify it:
@@ -151,16 +208,16 @@ dcpverify dcp/
 ```
 
 Other tools: `gail-check` (DCI codestream checker, also run on every frame inside
-`gail-enc`), `gail-bench` (throughput without decode), `gail-tests` (unit and bit-exactness
-tests), `gail-api-test` (library API). How the output was validated beyond that, with
+`gail-enc`), `gail-bench` (encoder throughput without the source's decode), `gail-tests`
+(unit and bit-exactness tests), `gail-api-test` (library API). How the output was validated beyond that, with
 independent decoders and verifiers, is in [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Documentation
 
-* [docs/DESIGN.md](docs/DESIGN.md) — pipeline, GPU Tier-1 design, rate control, multi-GPU
+* [docs/DESIGN.md](docs/DESIGN.md) — pipeline, GPU Tier-1 design, rate control, multi-GPU, the decoder
 * [docs/COLOR.md](docs/COLOR.md) — color modes, tone map, gamut, how the defaults were chosen
 * [docs/LIBRARY.md](docs/LIBRARY.md) — the C library: building (Linux, Windows, macOS), linking, API
-* [integrations/ffmpeg](integrations/ffmpeg/README.md) — building FFmpeg with the `libgail` encoder
+* [integrations/ffmpeg](integrations/ffmpeg/README.md) — building FFmpeg with the `libgail` encoder and decoder
 * [docs/VALIDATION.md](docs/VALIDATION.md) — how compliance is verified, results
 * [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — per-stage timings and scaling
 * [CHANGELOG.md](CHANGELOG.md) — what changed in each release
@@ -172,7 +229,7 @@ Audio is out of scope (handled by a separate encoder).
 GAIL is released under the [MIT license](LICENSE), copyright (c) 2026 Joseph Stackhouse.
 Every source file carries an `SPDX-License-Identifier: MIT` line.
 
-* `integrations/ffmpeg/libgailenc.c` is additionally offered under FFmpeg's LGPL-2.1-or-later,
-  as FFmpeg requires for code in its tree; it carries that header.
+* `integrations/ffmpeg/libgailenc.c` and `libgaildec.c` are additionally offered under
+  FFmpeg's LGPL-2.1-or-later, as FFmpeg requires for code in its tree; they carry that header.
 * The CUDA runtime inside `libgail` is NVIDIA's, redistributed under the CUDA EULA.
 * JPEG 2000 Part 1, the only codec here, is royalty-free under the standard's patent policy.

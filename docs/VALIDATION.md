@@ -1,7 +1,7 @@
 # Validation
 
-DCI cinema compatibility is checked at six levels, run on every directory of encoded
-frames before a release. Only the first level ships in this repository (`gail-check`); the
+The encoder's DCI cinema compatibility is checked at six levels, run on every directory
+of encoded frames before a release. Only the first level ships in this repository (`gail-check`); the
 others are external tools and the harness that drives them is not part of the library.
 
 1. **Own DCI checker** (`gail-check`, also run on every frame inside `gail-enc`): parses
@@ -42,6 +42,44 @@ of 2K and 4K frames; GPU DWT vs CPU (max difference 0.003); GPU Y'CbCr (4:2:0, 4
 injection (a device dying mid-frame, refused frame slots, a failing source or sink, a
 cancel from another thread). The API test (`gail-api-test`) covers every calling pattern,
 every input format, canceling and the binary-compatibility rules.
+
+## The decoder
+
+The decoder is checked from the other side: against the encoder, against two independent
+decoders, and against input that is wrong on purpose.
+
+1. **Round trip** (`gail-tests`, `gail-api-test`): frames are encoded and decoded again.
+   Reading an encoded frame's packets gives back, for every code-block, exactly the passes
+   and bytes that were written; the decoded picture is as close to the source as the
+   encoder's own estimate says (63.6 dB against an estimated 63.8 at 2K, 49.6 against 49.5
+   at 4K for the test pattern at the 250 Mbit/s limit).
+2. **Two block decoders written differently:** the CPU backend's and the one the GPU
+   backends share give the same words for 400 random code-blocks at every one of their
+   11,494 truncation points, and both match the independent test decoder there.
+3. **GPU against CPU:** the CUDA and Vulkan decoders' coefficients (Tier-1 and step sizes)
+   are bit-identical to the CPU decoder's for every code-block of 2K and 4K frames, at
+   full and half size. Their pictures, which go through the float wavelet on a different
+   machine, differ from the CPU decoder's by at most one code value, in about 0.03 % of
+   the samples. The two GPUs give identical pictures.
+4. **OpenJPEG and FFmpeg** as references, on 48 consecutive frames from each of four DCPs
+   (2K and 4K, made by GAIL and by DCP-o-matic 2.18.50, 250 Mbit/s): no sample more than
+   one code value from FFmpeg's `jpeg2000` decoder, with about 0.05 % of the samples
+   differing at all; and on four frames of each, no sample more than one code value from
+   OpenJPEG 2.5.4, with about 0.8 % differing. The same holds through FFmpeg with the
+   `libgail` decoder, after a seek and with `-lowres 1` and `-lowres 2`.
+5. **Damaged input** (`gail-tests`): 360 frames with bits flipped in the headers, in the
+   packet headers and in the code-block data, with header bytes replaced, with runs of
+   `0xFF` and with their ends cut off. Each is refused with a reason or decodes to some
+   picture, and the intact frame decodes exactly as before afterwards. A frame cut short at
+   any of some 1,600 lengths (every length within the headers among them) is refused.
+   Random bytes handed to the block decoders stay inside their block.
+6. **Sanitizers:** the decoder's tests, the damaged-input test among them, and the whole
+   API test run clean under AddressSanitizer and UndefinedBehaviorSanitizer; a CI job
+   repeats that on every push.
+
+Not covered: Vulkan decoding on AMD and Intel GPUs and on macOS; players using the FFmpeg
+decoder (mpv, VLC); DCI streams from encoders other than GAIL and OpenJPEG (through
+DCP-o-matic). Streams with more than one quality layer are refused, not decoded.
 
 ## Results: full 30 s test clip (720 frames, 24 fps, 230 Mbit/s target)
 
