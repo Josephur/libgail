@@ -9,6 +9,7 @@
 #include "core/bitio.h"
 #include "core/build_version.h"
 #include "core/markers.h"
+#include "core/progression.h"
 #include "core/tagtree.h"
 #include "kernels/portable.h"
 
@@ -193,7 +194,6 @@ const char* codestreamLabel() {
 void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* passes, std::vector<uint8_t>* out,
                      CodestreamSizes* sizes) {
     const bool fourk = L.profile == Profile::Cinema4K;
-    const int NL = L.levels;
     const int ntp = fourk ? 6 : 3;
     PacketWriter pw{L, t1, passes, {}, {}};
 
@@ -206,22 +206,12 @@ void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* 
         *out = hdr;
     }
 
-    struct Poc {
-        int rs, re;
-    };
-    const Poc pocs[2] = {{0, fourk ? NL : NL + 1}, {NL, NL + 1}};
-    const int npoc = fourk ? 2 : 1;
+    ProgressionVolume vols[2];
+    const int npoc = progressionVolumes(L, vols);
     CodestreamSizes sz;
     sz.numTileParts = ntp;
     size_t total = hdr.size();
     for (int pi = 0; pi < npoc; ++pi) {
-        const Poc poc = pocs[pi];
-        int ystep = 1 << 30, xstep = 1 << 30;
-        for (int r = poc.rs; r < poc.re; ++r) {
-            const Resolution& R = L.resolution(0, r);
-            xstep = std::min(xstep, 1 << (R.ppx + NL - r));
-            ystep = std::min(ystep, 1 << (R.ppy + NL - r));
-        }
         for (int c = 0; c < kNumComps; ++c) {
             const int tp = pi * 3 + c;
             size_t sotPos = 0;
@@ -236,16 +226,7 @@ void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* 
                 put16(*out, marker::SOD);
             }
             size_t tpBytes = 14;  // SOT (12) + SOD (2)
-            for (int y = 0; y < L.height; y += ystep)
-                for (int x = 0; x < L.width; x += xstep)
-                    for (int r = poc.rs; r < poc.re; ++r) {
-                        const Resolution& R = L.resolution(c, r);
-                        const int xr = 1 << (R.ppx + NL - r), yr = 1 << (R.ppy + NL - r);
-                        if ((x & (xr - 1)) || (y & (yr - 1))) continue;
-                        const int px = x / xr, py = y / yr;
-                        if (px >= R.npx || py >= R.npy) continue;
-                        tpBytes += pw.write(c, r, py * R.npx + px, out);
-                    }
+            forEachPacket(L, vols[pi], c, [&](int r, int prec) { tpBytes += pw.write(c, r, prec, out); });
             if (out) {
                 const uint32_t psot = (uint32_t)(out->size() - sotPos);
                 if (psot != tpBytes) throw std::logic_error("tile-part size mismatch");

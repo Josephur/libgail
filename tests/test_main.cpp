@@ -22,6 +22,7 @@
 #include "core/dwt_cpu.h"
 #include "core/frame_source.h"
 #include "core/pipeline.h"
+#include "core/progression.h"
 #include "core/quant.h"
 #include "core/rate_control.h"
 #include "core/t1_ref.h"
@@ -1353,6 +1354,57 @@ static void testTagTree() {
     }
 }
 
+// The packet order both the writer and a reader follow: every precinct of every
+// resolution exactly once per component, in the order B.12.1.5 gives for
+// component-position-resolution-layer, with the 4K frame's two volumes one after the other.
+static void testProgression() {
+    const struct {
+        Profile p;
+        int w, h;
+    } cases[] = {{Profile::Cinema2K, 1998, 1080}, {Profile::Cinema2K, 2048, 858}, {Profile::Cinema4K, 4096, 2160},
+                 {Profile::Cinema4K, 3996, 2160}, {Profile::Cinema4K, 4096, 1716}};
+    for (auto& cs : cases) {
+        const FrameLayout L = makeLayout(cs.w, cs.h, cs.p, 1.0);
+        const int NL = L.levels;
+        ProgressionVolume vols[2];
+        const int nv = progressionVolumes(L, vols);
+        CHECK(nv == (cs.p == Profile::Cinema4K ? 2 : 1), "%dx%d: %d volumes", cs.w, cs.h, nv);
+        CHECK(vols[0].rs == 0 && vols[nv - 1].re == NL + 1 && (nv == 1 || vols[0].re == vols[1].rs),
+              "%dx%d: volumes do not cover resolutions 0..%d once", cs.w, cs.h, NL);
+        for (int c = 0; c < kNumComps; ++c) {
+            std::vector<std::vector<int>> seen(NL + 1);
+            for (int r = 0; r <= NL; ++r) seen[r].assign(L.resolution(c, r).precincts.size(), 0);
+            for (int vi = 0; vi < nv; ++vi) {
+                // B.12.1.5 written out directly: for each position on the reference grid, for each
+                // resolution, the precinct whose top-left corner sits at that position
+                std::vector<std::pair<int, int>> want;
+                for (int y = 0; y < cs.h; ++y)
+                    for (int x = 0; x < cs.w; ++x) {
+                        if ((x | y) & 127) continue;  // no precinct corner is finer than 128 here
+                        for (int r = vols[vi].rs; r < vols[vi].re; ++r) {
+                            const Resolution& R = L.resolution(c, r);
+                            const long long sx = 1LL << (R.ppx + NL - r), sy = 1LL << (R.ppy + NL - r);
+                            if (x % sx || y % sy) continue;
+                            const int px = (int)(x / sx), py = (int)(y / sy);
+                            if (px < R.npx && py < R.npy) want.push_back({r, py * R.npx + px});
+                        }
+                    }
+                std::vector<std::pair<int, int>> got;
+                forEachPacket(L, vols[vi], c, [&](int r, int prec) {
+                    got.push_back({r, prec});
+                    if (r >= 0 && r <= NL && prec >= 0 && prec < (int)seen[r].size()) ++seen[r][prec];
+                });
+                CHECK(got == want, "%dx%d comp %d volume %d: packet order differs (%zu vs %zu packets)", cs.w, cs.h, c,
+                      vi, got.size(), want.size());
+            }
+            int wrong = 0;
+            for (auto& v : seen)
+                for (int n : v) wrong += n != 1;
+            CHECK(wrong == 0, "%dx%d comp %d: %d precincts not visited exactly once", cs.w, cs.h, c, wrong);
+        }
+    }
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1409,6 +1461,7 @@ int main(int argc, char** argv) {
     run("pool", testThreadPool);
     run("bitio", testBitIo);
     run("tagtree", testTagTree);
+    run("progression", testProgression);
     run("dwt", testDwtRoundTrip);
     run("norms", testNorms);
     run("t1", testT1Truncation);
