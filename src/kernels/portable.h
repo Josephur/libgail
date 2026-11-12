@@ -20,6 +20,7 @@
 #define TO_I32(x) int(x)
 #define TO_U64(x) uint64_t(x)
 #define FIND_MSB(x) findMSB(x)
+#define FIND_LSB(x) findLSB(x)
 #define POPCOUNT(x) bitCount(x)
 #define TO_F32(x) float(x)
 #define FMIN(a, b) min(a, b)
@@ -41,6 +42,7 @@
 #define TO_I32(x) ((int32_t)(x))
 #define TO_U64(x) ((uint64_t)(x))
 #define FIND_MSB(x) (31 - __clz((int)(x)))
+#define FIND_LSB(x) (__ffs((int)(x)) - 1)
 #define POPCOUNT(x) __popc(x)
 #define TO_F32(x) ((float)(x))
 #define FMIN(a, b) fminf(a, b)
@@ -68,9 +70,15 @@ static inline int gail_find_msb(uint32_t x) {
     return _BitScanReverse(&i, x) ? (int)i : -1;
 }
 #define FIND_MSB(x) gail_find_msb((uint32_t)(x))
+static inline int gail_find_lsb(uint32_t x) {
+    unsigned long i;
+    return _BitScanForward(&i, x) ? (int)i : -1;
+}
+#define FIND_LSB(x) gail_find_lsb((uint32_t)(x))
 #define POPCOUNT(x) ((int)__popcnt((uint32_t)(x)))
 #else
 #define FIND_MSB(x) ((x) == 0 ? -1 : 31 - __builtin_clz((uint32_t)(x)))
+#define FIND_LSB(x) ((x) == 0 ? -1 : __builtin_ctz((uint32_t)(x)))
 #define POPCOUNT(x) __builtin_popcount((uint32_t)(x))
 #endif
 #include <cmath>

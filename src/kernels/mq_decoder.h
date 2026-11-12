@@ -78,48 +78,39 @@ GAIL_FN void mqd_init(INOUT(MqDec) d, MQD_IN_T in, U32 start, U32 len) {
     MQD_CTX(d, MQ_CTX_UNI) = MQD_TAB(46);
 }
 
-// RENORMD (C.3.3)
-GAIL_FN void mqd_renorm(INOUT(MqDec) d, MQD_IN_T in) {
-    do {
-        if (d.CT == 0) mqd_bytein(d, in);
-        d.A <<= 1;
-        d.C <<= 1;
-        d.CT -= 1;
-    } while ((d.A & 0x8000u) == 0u);
-}
-
-// DECODE (C.3.2): the next decision in context cx.
+// DECODE (C.3.2) with RENORMD (C.3.3): the next decision in context cx. The common case,
+// the more probable symbol with no renormalization, returns after one context read. The
+// rest is one path for both symbols, so threads of a GPU warp stay together, and it
+// shifts by as many bits at a time as the byte in hand allows.
 GAIL_FN U32 mqd_decode(INOUT(MqDec) d, U32 cx, MQD_IN_T in) {
     U32 st = MQD_CTX(d, cx);
     U32 qe = st & 0xFFFFu;
     U32 mps = st >> 31;
-    U32 nmps = MQD_TAB((st >> 16) & 63u) | (mps << 31);
-    U32 nlps = MQD_TAB((st >> 22) & 63u) | ((mps ^ ((st >> 28) & 1u)) << 31);
-    U32 bit = mps;
-    d.A -= qe;
-    if ((d.C >> 16) < qe) {
-        // the lower sub-interval: the less probable symbol unless the intervals are exchanged
-        if (d.A < qe) {
-            MQD_CTX(d, cx) = nmps;
-        } else {
-            bit = mps ^ 1u;
-            MQD_CTX(d, cx) = nlps;
-        }
-        d.A = qe;
-        mqd_renorm(d, in);
-    } else {
+    U32 a = d.A - qe;
+    bool lower = (d.C >> 16) < qe;  // the code falls in the lower sub-interval
+    if (!lower) {
         d.C -= qe << 16;
-        if ((d.A & 0x8000u) == 0u) {
-            if (d.A < qe) {
-                bit = mps ^ 1u;
-                MQD_CTX(d, cx) = nlps;
-            } else {
-                MQD_CTX(d, cx) = nmps;
-            }
-            mqd_renorm(d, in);
+        if ((a & 0x8000u) != 0u) {
+            d.A = a;
+            return mps;
         }
     }
-    return bit;
+    // Conditional exchange: the symbol is the more probable one iff (a < qe) == lower
+    bool isMps = (a < qe) == lower;
+    d.A = lower ? qe : a;
+    U32 next = isMps ? ((st >> 16) & 63u) : ((st >> 22) & 63u);
+    U32 nmps = isMps ? mps : (mps ^ ((st >> 28) & 1u));
+    MQD_CTX(d, cx) = MQD_TAB(next) | (nmps << 31);
+    I32 n = 15 - FIND_MSB(d.A);
+    do {
+        if (d.CT == 0) mqd_bytein(d, in);
+        I32 s = n < d.CT ? n : d.CT;
+        d.A <<= TO_U32(s);
+        d.C <<= TO_U32(s);
+        d.CT -= s;
+        n -= s;
+    } while (n > 0);
+    return isMps ? mps : (mps ^ 1u);
 }
 
 #endif

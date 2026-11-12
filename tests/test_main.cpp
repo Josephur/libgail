@@ -39,6 +39,18 @@
 #define MQ_GET(o, i) ((uint32_t)(o)[(i)])
 #include "t1_decoder.h"
 
+// The GPU backends' block decoder, compiled for the host
+#include "core/t1_dec_tables.h"
+static uint8_t g_t1dZc[gail::kT1dZcSize], g_t1dSc[gail::kT1dScSize];
+#define MQD_IN_T const uint8_t*
+#define MQD_BYTE(in, i) ((uint32_t)(in)[(i)])
+#define T1D_OUT_T uint32_t*
+#define T1D_WR(out, i, v) ((out)[(i)] = (v))
+#define T1D_RD(out, i) ((out)[(i)])
+#define T1D_ZC(i) ((uint32_t)g_t1dZc[(i)])
+#define T1D_SC(i) ((uint32_t)g_t1dSc[(i)])
+#include "kernels/t1_decode.h"
+
 using namespace gail;
 
 static int g_fail = 0;
@@ -1828,6 +1840,59 @@ static void testDecodeMutations() {
     CHECK(out == good, "the intact frame decodes differently after the damaged ones");
 }
 
+// The block decoder the GPU backends share, run on the host: the same words as the CPU
+// backend's decoder for every block at every truncation point.
+static void testT1DecodeKernel() {
+    buildT1DecodeTables(g_t1dZc, g_t1dSc);
+    std::mt19937 rng(42);
+    int checks = 0;
+    for (int trial = 0; trial < 400; ++trial) {
+        const int w = trial % 7 == 0 ? 1 + rng() % 32 : 32;
+        const int h = trial % 5 == 0 ? 1 + rng() % 32 : 32;
+        const int orient = trial % 4;
+        std::vector<uint32_t> c(kCblkArea, 0);
+        const int mode = trial % 3;
+        std::normal_distribution<double> g(0, mode == 0 ? 20 : (mode == 1 ? 300 : 3000));
+        std::uniform_real_distribution<double> sp(0, 1);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                double v = g(rng);
+                if (mode == 1 && sp(rng) < 0.7) v *= 0.05;
+                c[y * 32 + x] = quantizeCoeff((float)v, 1.0f, (1u << 26) - 1);
+            }
+        T1Result res;
+        t1EncodeRef(c.data(), w, h, orient, res);
+        if (!res.nbps) continue;
+        for (int k = 1; k <= res.numPasses; ++k) {
+            const uint32_t len = res.passLen[k - 1];
+            std::vector<uint32_t> want(kCblkArea, 0), got(kCblkArea, 0);
+            t1DecodeBlock(res.data.data(), len, w, h, orient, res.nbps, k, want.data());
+            T1dState st;
+            MqDec q;
+            mqd_init(q, res.data.data(), 0, len);
+            t1d_decode_block(st, q, res.data.data(), (uint32_t)w, (uint32_t)h, (uint32_t)orient, (uint32_t)res.nbps, (uint32_t)k,
+                             got.data());
+            CHECK(got == want, "trial %d, %d of %d passes: the kernel decodes differently from the CPU decoder", trial, k,
+                  res.numPasses);
+            ++checks;
+        }
+    }
+    std::printf("  %d truncation points\n", checks);
+    // junk, and descriptors that make no sense, stay inside the block's 1024 words
+    for (int trial = 0; trial < 300; ++trial) {
+        const uint32_t len = rng() % 200;
+        std::vector<uint8_t> junk(len);
+        for (auto& b : junk) b = trial % 3 ? (uint8_t)rng() : 0xFF;
+        std::vector<uint32_t> out(kCblkArea + 2, 0);
+        out[0] = out[kCblkArea + 1] = 0xC0FFEEu;
+        T1dState st;
+        MqDec q;
+        mqd_init(q, junk.data(), 0, len);
+        t1d_decode_block(st, q, junk.data(), rng() % 40, rng() % 40, rng() % 8, rng() % 40, rng() % 200, out.data() + 1);
+        CHECK(out[0] == 0xC0FFEEu && out[kCblkArea + 1] == 0xC0FFEEu, "trial %d: wrote outside the block", trial);
+    }
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1896,6 +1961,7 @@ int main(int argc, char** argv) {
     run("t1", testT1Truncation);
     run("t1limit", testT1PassLimit);
     run("t1dec", testT1Decode);
+    run("t1kernel", testT1DecodeKernel);
     run("frame2k", [] { testFrameCpu(Profile::Cinema2K); });
     run("frame4k", [] { testFrameCpu(Profile::Cinema4K); });
     run("yuv4k", [] { testYuv(Profile::Cinema4K); });
