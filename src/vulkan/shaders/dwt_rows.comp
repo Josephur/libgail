@@ -3,6 +3,7 @@
 // Horizontal 9/7 analysis of one row per workgroup (lifting in shared memory).
 // Reads the current LL region of src, writes low|high de-interleaved rows to dst.
 #include "common.glsl"
+#include "kernels/dwt97.h"
 
 layout(local_size_x = 256) in;
 
@@ -16,11 +17,11 @@ layout(push_constant) uniform PC {
 
 shared float row[4096];
 
-const float ALPHA = -1.586134342059924;
-const float BETA = -0.052980118572961;
-const float GAMMA = 0.882911075530934;
-const float DELTA = 0.443506852043971;
-const float K = 1.230174104914001;
+const float ALPHA = float(DWT97_ALPHA);
+const float BETA = float(DWT97_BETA);
+const float GAMMA = float(DWT97_GAMMA);
+const float DELTA = float(DWT97_DELTA);
+const float K = float(DWT97_K);
 
 int mirror(int i, int n) {
     if (i < 0) return -i;

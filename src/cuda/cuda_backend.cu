@@ -18,6 +18,8 @@
 #include "core/t1_ref.h"
 #include "cuda/cuda_common.h"
 #include "cuda/cuda_decode.h"
+#include "kernels/dwt97.h"
+#include "kernels/ict.h"
 
 // ---- shared Tier-1 kernels (portable headers) -------------------------------------
 // MQ output sink with capacity check; the coder's contexts and probability table live
@@ -131,14 +133,14 @@ __global__ void colorKernel(const void* __restrict__ src, const float* __restric
         xyz[3 * i + 2] = (uint16_t)cz;
     }
     const float x = cx - 2048.f, y = cy - 2048.f, z = cz - 2048.f;
-    planes[i] = 0.299f * x + 0.587f * y + 0.114f * z;
-    planes[npix + i] = -0.16875f * x - 0.33126f * y + 0.5f * z;
-    planes[2 * npix + i] = 0.5f * x - 0.41869f * y - 0.08131f * z;
+    planes[i] = (float)ICT_Y0_R * x + (float)ICT_Y0_G * y + (float)ICT_Y0_B * z;
+    planes[npix + i] = (float)ICT_Y1_R * x + (float)ICT_Y1_G * y + (float)ICT_Y1_B * z;
+    planes[2 * npix + i] = (float)ICT_Y2_R * x + (float)ICT_Y2_G * y + (float)ICT_Y2_B * z;
 }
 
 // ---------------------------------------------------------------- DWT
-__constant__ float kLift[4] = {-1.586134342059924f, -0.052980118572961f, 0.882911075530934f, 0.443506852043971f};
-constexpr float kK = 1.230174104914001f;
+__constant__ float kLift[4] = {(float)DWT97_ALPHA, (float)DWT97_BETA, (float)DWT97_GAMMA, (float)DWT97_DELTA};
+constexpr float kK = (float)DWT97_K;
 
 // Whole-sample symmetric extension of a signal of length n >= 2 (only halo samples
 // outside the signal take the loop; the lifting loops never call this).
@@ -1075,6 +1077,9 @@ public:
     bool canDecode() const override { return true; }
     std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout& L, const DecodeSettings& s) override {
         return createCudaDecoderSlot(dev_, L, s);
+    }
+    uint64_t decoderSlotBytes(const FrameLayout& L, const DecodeSettings& s) const override {
+        return gpuDecoderSlotBytes(L, s);
     }
     DeviceMemory memory() const override {
         DeviceMemory m;

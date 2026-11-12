@@ -57,6 +57,9 @@ public:
     // Decoding (vk_decode.cpp)
     bool canDecode() const override { return true; }
     std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout& L, const DecodeSettings& s) override;
+    uint64_t decoderSlotBytes(const FrameLayout& L, const DecodeSettings& s) const override {
+        return gpuDecoderSlotBytes(L, s);
+    }
     // The decoder's pipelines, made when the first decode slot asks for them.
     VkPipeline decodePipe(int which);
     // The largest device-local heap: its size, and (with VK_EXT_memory_budget) how much of

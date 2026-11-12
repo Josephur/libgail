@@ -471,6 +471,12 @@ static void dec_on_image(void* user, const gail_image* img) {
     ++dec_cb_calls;
 }
 
+static int dec_log_fit;
+static void dec_on_log(void* user, gail_log_level level, const char* message) {
+    (void)user;
+    if (level <= GAIL_LOG_WARNING && strstr(message, "frames in flight fit")) ++dec_log_fit;
+}
+
 typedef struct dec_thread {
     gail_decoder* d;
     const dec_set* s;
@@ -747,6 +753,26 @@ static void test_decoder(void) {
         CHECK(gail_decoder_receive(d, &img, 0) == GAIL_ERROR_STATE, "receive allowed in callback mode");
         CHECK(gail_decoder_finish(d) == GAIL_OK, "finish (callback): %s", gail_last_error());
         CHECK(dec_cb_calls == DEC_FRAMES && dec_cb_bad == 0, "callback: %d calls, %d wrong", dec_cb_calls, dec_cb_bad);
+        gail_decoder_destroy(d);
+    }
+
+    /* a memory limit that holds one frame: the decoder runs with one frame in flight per
+       GPU and says so (the CPU backend has no device memory to limit) */
+    gail_decoder_config_defaults(&dc);
+    dc.max_device_memory = (uint64_t)100 << 20;
+    dc.log = dec_on_log;
+    dc.log_level = GAIL_LOG_WARNING;
+    d = NULL;
+    dec_log_fit = 0;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK, "decoder create (memory limit): %s", gail_last_error());
+    if (d) {
+        gail_image img;
+        memset(&img, 0, sizeof img);
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_OK && memcmp(img.data[0], frame0, (size_t)w * h * 6) == 0,
+              "decode under a memory limit: %s", gail_last_error());
+        gail_image_free(&img);
+        const int gpu = strstr(gail_decoder_devices(d), "CUDA") || strstr(gail_decoder_devices(d), "Vulkan");
+        CHECK(!gpu || dec_log_fit > 0, "frames in flight not reduced to fit max_device_memory");
         gail_decoder_destroy(d);
     }
 

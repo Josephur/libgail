@@ -27,6 +27,7 @@
 #include "core/backend.h"
 #include "core/codestream_parse.h"
 #include "core/decode_backend.h"
+#include "core/pipeline.h"
 #include "core/t2_parse.h"
 
 namespace {
@@ -207,10 +208,18 @@ struct gail_decoder {
         ds.highBits = cfg.output == GAIL_PIX_XYZ12_MSB;
         decodedSize(*layout, ds.reduce, outW, outH);
 
+        // As many frames in flight as asked for and as fit the device memory that is free
+        // now, with headroom left for other programs on the GPU, as the encoder plans its own
         const int perDevice = cfg.frames_in_flight > 0 ? cfg.frames_in_flight : (backend == "cpu" ? kCpuSlots : 3);
         std::string refused;
-        for (size_t dv = 0; dv < devices.size(); ++dv)
-            for (int i = 0; i < perDevice; ++i) {
+        for (size_t dv = 0; dv < devices.size(); ++dv) {
+            const uint64_t per = devices[dv]->decoderSlotBytes(*layout, ds);
+            const DeviceMemory mem = devices[dv]->memory();
+            const int fit = fitSlots(mem.budgeted ? mem.available : 0, mem.total, per, perDevice, cfg.max_device_memory);
+            if (fit < perDevice)
+                log(GAIL_LOG_WARNING, "%s: %d of %d frames in flight fit the free device memory (about %llu MiB per frame)",
+                    devices[dv]->name().c_str(), fit, perDevice, (unsigned long long)(per >> 20));
+            for (int i = 0; i < fit; ++i) {
                 try {
                     auto w = std::make_unique<Worker>();
                     w->slot = devices[dv]->createDecoderSlot(*layout, ds);
@@ -230,6 +239,7 @@ struct gail_decoder {
                     return fail(GAIL_ERROR_FAILED, e.what());
                 }
             }
+        }
         if (workers.empty()) {
             const std::string why = "no device has room for a " + std::to_string(layout->width) + "x" +
                                     std::to_string(layout->height) + " frame" + (refused.empty() ? "" : ": " + refused);

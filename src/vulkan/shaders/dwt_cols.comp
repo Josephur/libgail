@@ -5,6 +5,7 @@
 // there (the halo absorbs the +-4 sample dependency), and the interior rows are
 // written de-interleaved (low half / high half) to dst.
 #include "common.glsl"
+#include "kernels/dwt97.h"
 
 layout(local_size_x = 32, local_size_y = 8) in;
 
@@ -22,11 +23,11 @@ layout(push_constant) uniform PC {
 
 shared float tile[ROWS][33];
 
-const float ALPHA = -1.586134342059924;
-const float BETA = -0.052980118572961;
-const float GAMMA = 0.882911075530934;
-const float DELTA = 0.443506852043971;
-const float K = 1.230174104914001;
+const float ALPHA = float(DWT97_ALPHA);
+const float BETA = float(DWT97_BETA);
+const float GAMMA = float(DWT97_GAMMA);
+const float DELTA = float(DWT97_DELTA);
+const float K = float(DWT97_K);
 
 int mirror(int i, int n) {
     int period = 2 * (n - 1);

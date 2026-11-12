@@ -81,6 +81,8 @@ public:
     virtual std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout&, const DecodeSettings&) {
         throw std::runtime_error(name() + " does not decode");
     }
+    // Device memory one decode slot for this layout allocates (0 = none / unknown).
+    virtual uint64_t decoderSlotBytes(const FrameLayout&, const DecodeSettings&) const { return 0; }
     // Device memory one slot for this layout allocates (0 = none / unknown), and what is
     // left now; the pipeline sizes the number of frames in flight from these.
     virtual uint64_t slotBytes(const FrameLayout&, const EncodeSettings&) const { return 0; }

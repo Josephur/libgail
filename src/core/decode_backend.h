@@ -53,6 +53,15 @@ public:
 // CPU reference backend. The slot keeps the settings by value and the geometry of L.
 std::unique_ptr<DecoderSlot> createCpuDecoderSlot(const FrameLayout& L, const DecodeSettings& s, std::shared_ptr<ThreadPool> pool);
 
+// Device memory a GPU decode slot takes: two sets of three float planes, the packed
+// picture, and room for a frame's codestream and block table.
+inline uint64_t gpuDecoderSlotBytes(const FrameLayout& L, const DecodeSettings& s) {
+    int w, h;
+    decodedSize(L, s.reduce, w, h);
+    const uint64_t npix = (uint64_t)L.width * L.height;
+    return 2 * npix * 12 + (uint64_t)w * h * 6 + (4u << 20);
+}
+
 // Whether two layouts describe the same frame structure (size, levels, bands, blocks),
 // whatever their step sizes.
 inline bool sameGeometry(const FrameLayout& a, const FrameLayout& b) {
