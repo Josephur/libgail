@@ -26,6 +26,7 @@
 #include "core/rate_control.h"
 #include "core/t1_ref.h"
 #include "core/t2.h"
+#include "core/tagtree.h"
 #include "core/thread_pool.h"
 
 #define MQ_OUT_T uint8_t*
@@ -1291,6 +1292,67 @@ static void testBitIo() {
     CHECK(br.getBits(32) == 0 && br.overrun(), "bits past the end must read as zero and flag an overrun");
 }
 
+// Tag trees decode what they encode, for the two ways packet headers use them: the
+// inclusion tree asked "below layer + 1?" layer after layer, and the zero-bit-plane tree
+// read out in full for a block when it is first included.
+static void testTagTree() {
+    std::mt19937 rng(23);
+    const int sizes[][2] = {{1, 1}, {1, 7}, {4, 4}, {5, 3}, {13, 9}};
+    const int layers = 4;
+    for (auto& sz : sizes) {
+        const int w = sz[0], h = sz[1], n = w * h;
+        for (int trial = 0; trial < 400; ++trial) {
+            std::vector<int> first(n), zbp(n);
+            for (int i = 0; i < n; ++i) {
+                first[i] = (int)(rng() % (layers + 2));  // some blocks never included
+                zbp[i] = (int)(rng() % 21);
+            }
+            std::vector<uint8_t> bytes;
+            {
+                TagTree incl, imsb;
+                incl.init(w, h);
+                imsb.init(w, h);
+                for (int i = 0; i < n; ++i) {
+                    incl.setLeaf(i, first[i]);
+                    imsb.setLeaf(i, zbp[i]);
+                }
+                incl.finalize();
+                imsb.finalize();
+                BitWriter bw(&bytes);
+                for (int layer = 0; layer < layers; ++layer)
+                    for (int i = 0; i < n; ++i) {
+                        if (first[i] < layer) continue;  // already included: no tag tree bits
+                        incl.encode(bw, i, layer + 1);
+                        if (first[i] == layer) imsb.encode(bw, i, 999);
+                    }
+                bw.flush();
+            }
+            TagTree incl, imsb;
+            incl.init(w, h);
+            imsb.init(w, h);
+            BitReader br(bytes.data(), bytes.size());
+            std::vector<int> gotFirst(n, -1), gotZbp(n, -1);
+            for (int layer = 0; layer < layers; ++layer)
+                for (int i = 0; i < n; ++i) {
+                    if (gotFirst[i] >= 0) continue;
+                    if (!incl.decode(br, i, layer + 1)) continue;
+                    gotFirst[i] = layer;
+                    const bool known = imsb.decode(br, i, 999);
+                    CHECK(known, "%dx%d trial %d: zero bit-planes of leaf %d not resolved", w, h, trial, i);
+                    gotZbp[i] = imsb.value(i);
+                }
+            int bad = 0;
+            for (int i = 0; i < n; ++i) {
+                const bool included = first[i] < layers;
+                bad += included ? gotFirst[i] != first[i] || gotZbp[i] != zbp[i] : gotFirst[i] != -1;
+            }
+            CHECK(bad == 0, "%dx%d trial %d: %d leaves decoded wrongly", w, h, trial, bad);
+            CHECK(br.finish() == bytes.size() && !br.overrun(), "%dx%d trial %d: reader and writer disagree on length",
+                  w, h, trial);
+        }
+    }
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1346,6 +1408,7 @@ int main(int argc, char** argv) {
     };
     run("pool", testThreadPool);
     run("bitio", testBitIo);
+    run("tagtree", testTagTree);
     run("dwt", testDwtRoundTrip);
     run("norms", testNorms);
     run("t1", testT1Truncation);
