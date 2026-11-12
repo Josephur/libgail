@@ -22,7 +22,7 @@ option(GAIL_BUILD_SHARED "Build libgail as a shared library (libgail.so / gail.d
 option(GAIL_BUILD_STATIC "Also build the static library (libgail.a / gail_static.lib)" ON)
 option(GAIL_BUILD_TOOLS "Build gail-enc and the other command-line tools" ON)
 option(GAIL_BUILD_TESTS "Build the tests" ON)
-option(GAIL_NATIVE_ARCH "Optimise for this machine's CPU only (-march=native); not for distributed builds" OFF)
+option(GAIL_NATIVE_ARCH "Optimize for this machine's CPU only (-march=native); not for distributed builds" OFF)
 set(GAIL_VULKAN_INCLUDE_DIR "" CACHE PATH "Vulkan headers (only headers are needed; default: find_package(Vulkan))")
 
 if(MSVC)
@@ -33,7 +33,7 @@ else()
   if(GAIL_NATIVE_ARCH)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=native>)
   endif()
-  # (Vulkan's "sType first, rest zero" struct initialisers trip -Wmissing-field-initializers)
+  # (Vulkan's "sType first, rest zero" struct initializers trip -Wmissing-field-initializers)
   add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra;-Wno-missing-field-initializers>")
 endif()
 

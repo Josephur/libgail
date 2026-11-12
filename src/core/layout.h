@@ -32,7 +32,7 @@ struct Subband {
     int w = 0, h = 0;
     int ncbx = 0, ncby = 0; // code-block grid
     int cblkBase = 0;       // global index of the first code-block
-    int eps = 0, mu = 0;    // signalled step size (exponent, mantissa)
+    int eps = 0, mu = 0;    // signaled step size (exponent, mantissa)
     int Mb = 0;             // number of magnitude bitplanes (G + eps - 1)
     float delta = 1.f;      // quantization step derived from (eps, mu)
     double weight = 1.0;    // squared-error weight: image-domain MSE per unit coefficient error
@@ -79,14 +79,14 @@ struct FrameLayout {
         return comp * bandsPerComp() + (res == 0 ? 0 : 1 + 3 * (res - 1) + (orient - 1));
     }
     const Resolution& resolution(int comp, int res) const { return resolutions[comp * numRes() + res]; }
-    // Largest legal per-band step signalling (shared by all components via one QCD).
+    // Largest legal per-band step signaling (shared by all components via one QCD).
     int numCblks() const { return (int)cblks.size(); }
 };
 
 // Build the layout. width/height must fit the profile container (2048x1080 / 4096x2160).
 FrameLayout makeLayout(int width, int height, Profile profile, double baseStep);
 
-// L2 norm of the synthesis basis function of a subband (standard 9/7 normalisation).
+// L2 norm of the synthesis basis function of a subband (standard 9/7 normalization).
 double synthesisNorm(int level, int orient);
 // Synthesis gain of the inverse ICT for component c (0=Y, 1=Cb, 2=Cr).
 double ictSynthesisNorm(int comp);

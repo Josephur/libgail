@@ -19,7 +19,7 @@ backend with no usable device fails (`GAIL_ERROR_UNSUPPORTED`).
 
 | Backend | Needs | Tested on |
 |---|---|---|
-| **CUDA** | An NVIDIA GPU of the **Turing generation or newer**: GeForce GTX 16 / RTX 20, 30, 40, 50, the Quadro / RTX A / RTX PRO and data-centre parts from the T4 on. An NVIDIA **driver 580 or newer** (what CUDA 13 requires). Nothing else: the CUDA runtime is inside the library. | RTX 3090 (Ampere), RTX 5060 Ti (Blackwell), Linux; MSVC build on Windows |
+| **CUDA** | An NVIDIA GPU of the **Turing generation or newer**: GeForce GTX 16 / RTX 20, 30, 40, 50, the Quadro / RTX A / RTX PRO and data-center parts from the T4 on. An NVIDIA **driver 580 or newer** (what CUDA 13 requires). Nothing else: the CUDA runtime is inside the library. | RTX 3090 (Ampere), RTX 5060 Ti (Blackwell), Linux; MSVC build on Windows |
 | **Vulkan** | A GPU with a **Vulkan 1.3** driver and a compute queue, 32-wide subgroups (or subgroup size control that allows 32, as AMD's wave64 parts offer), and the core features `shaderInt64`, `shaderInt16`, `shaderInt8`, 8- and 16-bit storage buffers, `bufferDeviceAddress`, `timelineSemaphore` and `synchronization2`. NVIDIA: Pascal (GTX 10) or newer. AMD RDNA and Intel Arc / Xe drivers advertise all of this. `VK_EXT_memory_budget` and `VK_EXT_pci_bus_info` are used when present (frames-in-flight sizing, device IDs). | RTX 3090 and RTX 5060 Ti, Linux and Windows (under Wine). **AMD and Intel are untested**: the shaders use only core Vulkan 1.3, so they are expected to work; reports welcome |
 | **CPU** | Any x86-64 or arm64 CPU. Multithreaded reference implementation, bit-exact with the GPU backends. | Linux, Windows, macOS |
 
@@ -28,7 +28,7 @@ backend with no usable device fails (`GAIL_ERROR_UNSUPPORTED`).
   roughly half the CUDA throughput at 4K. Driver 580 is the last series for Pascal.
 * **CUDA architectures.** The library carries native code for sm_75 (Turing), sm_86
   (Ampere GeForce), sm_89 (Ada) and sm_120 (Blackwell GeForce), plus PTX for each, so other
-  supported parts (A100, Hopper, data-centre Blackwell) compile the PTX on first use, which
+  supported parts (A100, Hopper, data-center Blackwell) compile the PTX on first use, which
   takes a few seconds once per driver. `GAIL_CUDA_ARCHS` changes the list at build time.
 * **Device memory.** One frame in flight takes about 0.7 GB at 4K and 0.2 GB at 2K; the
   encoder starts as many as fit (3 by default) and runs with one if that is all there is,
@@ -219,11 +219,11 @@ devices.
   `gail_packet_free()`, which uses the library's own heap (this matters for a Windows DLL).
 * **Return values:** every call returns a `gail_status`, and `gail_last_error()` explains
   failures. Nothing is thrown across the C boundary.
-* **Logging:** `config.log` receives every message the library has (devices, colour,
+* **Logging:** `config.log` receives every message the library has (devices, color,
   non-DCI frame rates, non-compliant frames, a GPU that could not be set up, a frame
   redone on the CPU). The library never writes to stdout or stderr: with `log` NULL
   it is silent. `GAIL_LOG_WARNING` is worth showing to users; `GAIL_LOG_INFO` describes
-  each device and the colour settings, as `gail-enc -v` prints them.
+  each device and the color settings, as `gail-enc -v` prints them.
 
 ## Choosing GPUs
 
@@ -296,7 +296,7 @@ CPU backend too; default 2 there).
 
 ## Input
 
-| `gail_pixel_format` | Layout | Colour |
+| `gail_pixel_format` | Layout | Color |
 |---|---|---|
 | `GAIL_PIX_XYZ12` | interleaved 16-bit, 12-bit X'Y'Z' codes in the low bits (libdcp) | encoded exactly |
 | `GAIL_PIX_XYZ12_MSB` | the same, codes in the high bits (FFmpeg `xyz12le`) | encoded exactly |
@@ -310,11 +310,11 @@ Planar samples deeper than 8 bits are 16-bit words with the value in the low bit
 FFmpeg's `…le` formats.
 
 * **Container:** the container is set by `profile` + `container` (flat, scope, full). A
-  picture smaller than the container (`input.width` / `height`) is centred with black
+  picture smaller than the container (`input.width` / `height`) is centered with black
   borders; scaling is the caller's job.
 * **Planar input:** Y'CbCr and planar R'G'B' are converted on the GPU, so an app can hand
   over its decoder's own layout instead of converting it on the CPU first.
-* **Colour:** by default the handling matches DCP-o-matic. See [COLOR.md](COLOR.md) for
+* **Color:** by default the handling matches DCP-o-matic. See [COLOR.md](COLOR.md) for
   the options.
 * **Frame rates:** DCI frame rates are 24, 25, 30, 48, 50 and 60. At other rates the
   library warns, because the bitrate is shared over more frames.

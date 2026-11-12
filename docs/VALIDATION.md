@@ -41,7 +41,7 @@ of 2K and 4K frames; GPU DWT vs CPU (max difference 0.003); GPU Y'CbCr (4:2:0, 4
 4:4:4) and planar R'G'B' conversion vs CPU reference (≤ 1 code value); pipeline failure
 injection (a device dying mid-frame, refused frame slots, a failing source or sink, a
 cancel from another thread). The API test (`gail-api-test`) covers every calling pattern,
-every input format, cancelling and the binary-compatibility rules.
+every input format, canceling and the binary-compatibility rules.
 
 ## Results: full 30 s test clip (720 frames, 24 fps, 230 Mbit/s target)
 
@@ -60,7 +60,7 @@ Source: `test-media/real_4k_hdr_30s.mkv`, 3840×2160 H.264, BT.2020 PQ, 2000 cd/
 
 Every frame that has an X'Y'Z' reference (`gail-enc --dump-xyz N`) is decoded with
 OpenJPEG and compared with the encoder's input, so only the encoder's loss is measured,
-not the HDR → cinema colour conversion. Metrics: PSNR per component,
+not the HDR → cinema color conversion. Metrics: PSNR per component,
 and on the Y' (luminance) channel SSIM, XPSNR and VMAF (4K model at 4K). VMAF is scored on
 isolated stills, where its motion feature is zero, so even a perfect frame cannot reach
 100 (about 97.4 with the 1080p model); each reference is also scored against itself and

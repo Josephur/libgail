@@ -29,7 +29,7 @@ Encode HDR10 UHD to 4K DCI JPEG 2000 frames at 24 fps:
 ffmpeg -i film.mkv -r 24 -c:v libgail -f image2 j2c/%06d.j2c
 ```
 
-Scale to 2K (the picture is centred in the 1998×1080 flat container), at 25 fps:
+Scale to 2K (the picture is centered in the 1998×1080 flat container), at 25 fps:
 
 ```bash
 ffmpeg -i film.mkv -r 25 -vf scale=1920:1080 -c:v libgail -f image2 j2c/%06d.j2c
@@ -59,7 +59,7 @@ Accepted input formats:
 A source already in one of these layouts goes to GAIL as it is, and GAIL converts it on
 the GPU. For example, ProRes 422 stays 4:2:2, ProRes 4444 stays 4:4:4 and DPX stays planar
 R'G'B'. Other layouts are converted by FFmpeg to the closest one.
-Colour comes from the stream's tags (transfer, primaries, matrix, range, chroma location,
+Color comes from the stream's tags (transfer, primaries, matrix, range, chroma location,
 and the mastering peak from HDR metadata).
 
 | Option | Values | Default | |

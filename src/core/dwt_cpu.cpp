@@ -19,7 +19,7 @@ inline int mirror(int i, int n) {
 
 // x[i] += coef * (x[i-1] + x[i+1]) for all i with i % 2 == parity (n >= 2). The interior
 // runs without index arithmetic; only the two ends use the symmetric extension, where the
-// mirrored neighbour is x[1] (left) and x[n-2] (right). Same operations in the same order
+// mirrored neighbor is x[1] (left) and x[n-2] (right). Same operations in the same order
 // as the plain mirrored loop, so the results are bit-identical.
 template <typename T> inline void lift(T* x, int n, int parity, T coef) {
     int i = parity;

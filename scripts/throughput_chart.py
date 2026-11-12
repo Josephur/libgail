@@ -51,7 +51,7 @@ def main():
     profiles = ["4K", "2K"]
     backends = ["CUDA", "Vulkan"]
     groups = [(p, b) for p in profiles for b in backends]
-    colours = {"RTX 3090": "#4c72b0", "RTX 5060 Ti": "#55a868", "both": "#dd8452"}
+    colors = {"RTX 3090": "#4c72b0", "RTX 5060 Ti": "#55a868", "both": "#dd8452"}
 
     plt.rcParams.update({"font.size": 11, "font.family": "DejaVu Sans"})
     fig, ax = plt.subplots(figsize=(9, 4.8), dpi=150)
@@ -61,7 +61,7 @@ def main():
         for k, (gpu, v) in enumerate(zip(gpus, vals)):
             x = gi + (k - 1) * width
             label = gpu if gi == 0 else None
-            ax.bar(x, v, width, color=colours.get(gpu, "#888"), label=label, zorder=3)
+            ax.bar(x, v, width, color=colors.get(gpu, "#888"), label=label, zorder=3)
             ax.text(x, v + 4, f"{v:.0f}", ha="center", va="bottom", fontsize=9)
     for (p, (name, v)), style in zip(cpu.items(), (":", "--")):
         ax.axhline(v, color="#666", linestyle=style, linewidth=1, zorder=2,

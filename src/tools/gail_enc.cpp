@@ -33,7 +33,7 @@ void usage() {
         "      --frames N          number of frames to encode\n"
         "      --start SEC         start time in the source\n"
         "      --mbps N            max frame bitrate in Mbit/s (default 230, DCI hard limit 250)\n"
-        "      --step X            base quantisation step in 12-bit code values (default 1.0)\n"
+        "      --step X            base quantization step in 12-bit code values (default 1.0)\n"
         "      --backend B         auto | cuda | vulkan | cpu (default auto: CUDA when NVIDIA GPUs are\n"
         "                          present, else Vulkan, else CPU)\n"
         "      --gpus LIST         devices to use: 'all' (default), indices (0,1) or IDs as --list-devices\n"
@@ -49,7 +49,7 @@ void usage() {
         "      --transfer T        source transfer: auto | bt1886 | srgb | pq | hlg | linear\n"
         "      --primaries P       source primaries: auto | bt709 | bt2020 | p3d65 | dcip3\n"
         "      --hdr-peak NITS     source mastering peak for PQ/HLG (default: metadata or 1000)\n"
-        "\n  Colour handling (source -> DCI X'Y'Z'):\n"
+        "\n  Color handling (source -> DCI X'Y'Z'):\n"
         "      --tonemap M         for PQ/HLG sources: signal (default; HDR shown as gamma 2.4 video,\n"
         "                          as DCP-o-matic does) | shoulder | bt2390 | none\n"
         "      (the next four set the shoulder)\n"
@@ -60,7 +60,7 @@ void usage() {
         "      --knee F            start of the highlight roll-off, fraction of peak (default 0.25)\n"
         "      --cinema-peak N     target peak white, cd/m2 (default 48)\n"
         "      --sdr-white N       cd/m2 for SDR code value 1.0 (default 48)\n"
-        "      --gamut G           none (default, as DCP-o-matic) | p3d65 | dcip3: colours outside the\n"
+        "      --gamut G           none (default, as DCP-o-matic) | p3d65 | dcip3: colors outside the\n"
         "                          projector gamut are pulled toward neutral at constant luminance\n"
         "      --gamut-threshold F compression starts at this fraction of the gamut edge (default 0.8)\n"
         "      --lut3d FILE.cube   app-supplied 3D LUT, source R'G'B' -> X'Y'Z' (0..1); replaces the above\n"
@@ -280,7 +280,7 @@ int main(int argc, char** argv) {
                          info.width, info.height, info.fps, transferName(cp.transfer), primariesName(cp.primaries),
                          sourceMatrix(info).c_str(), untagged ? " (assumed: the stream is not tagged)" : "", cp.hdrPeak);
         }
-        std::fprintf(stderr, "  colour: %s\n", ColorConverter(cp).describe().c_str());
+        std::fprintf(stderr, "  color: %s\n", ColorConverter(cp).describe().c_str());
         for (size_t d = 0; d < devices.size(); ++d)
             std::fprintf(stderr, "  device %zu: %s\n", d, devices[d]->name().c_str());
 

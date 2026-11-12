@@ -8,7 +8,7 @@ layout(local_size_x = 256) in;
 layout(push_constant) uniform PC {
     uint64_t rgb;     // U16Buf, interleaved RGB
     uint64_t lut;     // F32Buf, 65536-entry EOTF (cd/m^2)
-    uint64_t params;  // F32Buf, colour parameters (kernels/color_math.h)
+    uint64_t params;  // F32Buf, color parameters (kernels/color_math.h)
     uint64_t planes;  // F32Buf, 3 planes of width*height
     uint64_t xyz;     // U16Buf (optional, 0 = none)
     uint64_t lut3d;   // F32Buf, optional 3D LUT (size in params)

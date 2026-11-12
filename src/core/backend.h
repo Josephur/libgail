@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Compute backend interface. A backend turns an RGB48 frame into Tier-1 output
-// (colour conversion, DWT, quantisation, EBCOT Tier-1). Rate control and Tier-2
+// (color conversion, DWT, quantization, EBCOT Tier-1). Rate control and Tier-2
 // run on the CPU and are shared by all backends.
 #pragma once
 #include <cstdint>
@@ -39,7 +39,7 @@ struct FrameTimings {
 struct FrameDebug {
     bool full = true;                // false: only the X'Y'Z' reference image
     std::vector<uint16_t> xyz12;     // interleaved integer X'Y'Z'
-    std::vector<uint32_t> coeffs;    // quantised code-block words
+    std::vector<uint32_t> coeffs;    // quantized code-block words
     std::vector<float> wavelet;      // 3 Mallat-layout planes after the DWT (GPU backends)
 };
 

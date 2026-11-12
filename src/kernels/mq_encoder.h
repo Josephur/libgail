@@ -153,7 +153,7 @@ GAIL_FN void mq_renorm(INOUT(MqEnc) e, MQ_OUT_T ob) {
 // CODEMPS / CODELPS (Annex C.2.5/C.2.6) in branch-free form. With a = A - Qe and
 // exch = (a < Qe) (conditional exchange), both procedures reduce to
 //   C += Qe   iff  isMps != exch,   else  A = Qe   (otherwise A = a)
-// and the context moves to NMPS / NLPS only when renormalisation follows. GPU lanes
+// and the context moves to NMPS / NLPS only when renormalization follows. GPU lanes
 // coding different code-blocks therefore no longer diverge on the MPS/LPS decision.
 GAIL_FN void mq_encode(INOUT(MqEnc) e, U32 cx, U32 d, MQ_OUT_T ob) {
     U32 t = MQ_CTX(e, cx);

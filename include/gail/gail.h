@@ -71,9 +71,9 @@ extern "C" {
  *   - gail_config only grows at its end; gail_config_defaults() records the size the
  *     program was built with in struct_size, and fields it lacks keep their defaults.
  *   - Every other struct keeps its size: fields added later take the place of `reserved`
- *     words, and a 0 there keeps the 1.0 behaviour. Structs the program fills in
+ *     words, and a 0 there keeps the 1.0 behavior. Structs the program fills in
  *     (gail_frame, and gail_input / gail_color through the config) must have them zeroed:
- *     start from gail_config_defaults() / gail_color_preset() and zero-initialise frames
+ *     start from gail_config_defaults() / gail_color_preset() and zero-initialize frames
  *     (gail_frame f = {0}). The encoder rejects non-zero reserved words, so a mistake
  *     shows up now rather than with a later version.
  *   - Enum values and functions may be added; existing ones keep their meaning. */
@@ -119,7 +119,7 @@ GAIL_API int gail_container_size(gail_profile profile, gail_container container,
 typedef enum gail_pixel_format {
     GAIL_PIX_RGB48 = 0,      /* interleaved 16-bit R'G'B' [rgb48le] */
     GAIL_PIX_XYZ12 = 1,      /* interleaved 16-bit words, 12-bit DCI X'Y'Z' codes in the low bits
-                                [libdcp rgb_to_xyz output]; encoded exactly, colour settings unused */
+                                [libdcp rgb_to_xyz output]; encoded exactly, color settings unused */
     GAIL_PIX_XYZ12_MSB = 2,  /* the same with the codes in the high bits [xyz12le] */
     GAIL_PIX_YUV420P = 3,    /* planar Y'CbCr 4:2:0, 8-bit [yuv420p] */
     GAIL_PIX_YUV420P10 = 4,  /* [yuv420p10le]: HDR10 H.264 / HEVC */
@@ -147,7 +147,7 @@ typedef enum gail_chroma_location {
 typedef struct gail_input {
     gail_pixel_format format;
     int width, height;   /* picture size; 0 = the container size. A smaller picture is
-                            centred in the container with black borders (no scaling). */
+                            centered in the container with black borders (no scaling). */
     /* Y'CbCr formats only */
     gail_matrix matrix;
     int full_range;      /* 0 = limited (video) range */
@@ -155,7 +155,7 @@ typedef struct gail_input {
     uint64_t reserved[4];  /* zero */
 } gail_input;
 
-/* ---- colour (R'G'B' and Y'CbCr input; X'Y'Z' input is never altered) ---------------- */
+/* ---- color (R'G'B' and Y'CbCr input; X'Y'Z' input is never altered) ---------------- */
 
 typedef enum gail_color_mode {
     GAIL_COLOR_MANAGED = 0,  /* transfer + primaries -> X'Y'Z' (below) */
@@ -189,14 +189,14 @@ typedef enum gail_tone_map {
 } gail_tone_map;
 
 typedef enum gail_tone_norm {   /* what SHOULDER / BT2390 are applied to */
-    GAIL_TONE_NORM_CHANNEL = 0,  /* each channel: bright saturated colours drift toward white */
+    GAIL_TONE_NORM_CHANNEL = 0,  /* each channel: bright saturated colors drift toward white */
     GAIL_TONE_NORM_MAXRGB = 1,   /* brightest channel: keeps hue and saturation */
     GAIL_TONE_NORM_LUMINANCE = 2 /* Y: keeps luminance; saturated highlights bleach */
 } gail_tone_norm;
 
 typedef enum gail_gamut {
-    GAIL_GAMUT_NONE = 0,  /* default, as DCP-o-matic: colours beyond the projector are left to it */
-    GAIL_GAMUT_P3D65 = 1, /* out-of-gamut colours are pulled toward neutral, not clipped */
+    GAIL_GAMUT_NONE = 0,  /* default, as DCP-o-matic: colors beyond the projector are left to it */
+    GAIL_GAMUT_P3D65 = 1, /* out-of-gamut colors are pulled toward neutral, not clipped */
     GAIL_GAMUT_DCIP3 = 2
 } gail_gamut;
 
@@ -231,7 +231,7 @@ typedef enum gail_preset {
 /* Fills *c with the defaults for that kind of source; change any field afterwards. */
 GAIL_API void gail_color_preset(gail_preset preset, gail_color* c);
 
-/* One-line description of the colour handling. Returns the full length like snprintf,
+/* One-line description of the color handling. Returns the full length like snprintf,
    or a negative status for invalid settings. */
 GAIL_API int gail_color_describe(const gail_color* c, char* buf, size_t size);
 

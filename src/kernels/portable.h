@@ -3,7 +3,7 @@
 //
 // Shared kernel code uses: U32/I32/U64 scalar types, GAIL_FN for helper
 // functions, INOUT(T) for by-reference parameters, GAIL_CONST for constant
-// tables and ARRAY_BEGIN/ARRAY_END for table initialisers.
+// tables and ARRAY_BEGIN/ARRAY_END for table initializers.
 #ifndef GAIL_PORTABLE_H
 #define GAIL_PORTABLE_H
 

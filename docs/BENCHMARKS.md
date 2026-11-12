@@ -33,17 +33,17 @@ decode (≈150 fps output-equivalent for this 59.94 → 24 fps clip) is then the
 
 | stage | ms |
 |---|---:|
-| colour (Y'CbCr → X'Y'Z' → ICT) | 0.17 |
+| color (Y'CbCr → X'Y'Z' → ICT) | 0.17 |
 | 9/7 DWT, 3 components, 6 levels | 0.71 |
-| quantisation | in Tier-1 |
-| Tier-1 context modelling (incl. quantisation) | 3.05 |
+| quantization | in Tier-1 |
+| Tier-1 context modeling (incl. quantization) | 3.05 |
 | Tier-1 MQ coding | 4.0 |
 | compaction + readback | 0.7 |
 
 Tier-1 is ~80% of GPU time. Rate control + Tier-2 on the CPU take ~3–8 ms per frame on
 one thread and run in parallel with GPU work.
 
-## Effect of the main optimisations (4K, RTX 3090, Vulkan)
+## Effect of the main optimizations (4K, RTX 3090, Vulkan)
 
 | change | effect |
 |---|---|
@@ -53,10 +53,10 @@ one thread and run in parallel with GPU work.
 | MQ contexts in shared memory, largest-first ordering | MQ 7.2 → 5.8 ms |
 | branch-free MQ coder | MQ 6.6 → 5.5 ms |
 | model-based rate control | CPU rate control ~25 → ~5–13 ms per frame |
-| native Y'CbCr input (GPU colour conversion) | 4× less upload; end to end 23–55 → 113 fps |
+| native Y'CbCr input (GPU color conversion) | 4× less upload; end to end 23–55 → 113 fps |
 | exact truncation lengths (carry fix) | +2.3 dB at the same bitrate |
 | MQ: 16-symbol unrolled chunks, context-state prefetch | MQ 5.6 → 4.1 ms (CUDA, 3090) |
-| quantisation fused into context modelling; compaction via device staging + exact copies (CUDA) | GPU time per 4K frame 12.6 → 11.2 ms (5060 Ti) |
+| quantization fused into context modeling; compaction via device staging + exact copies (CUDA) | GPU time per 4K frame 12.6 → 11.2 ms (5060 Ti) |
 | Vulkan: one compute queue per slot | 2K 134 → ~190 fps (3090), 132 → ~230 fps (5060 Ti) |
 | CPU backend: strip-wise DWT, thread pool, packed Tier-1 flags, two slots | 2K 6.9 → 24 fps, 4K 2.0 → 8.4 fps |
 
@@ -82,7 +82,7 @@ Compute contention (a CUDA kernel loop on the 3090 at 100 % / 50 % duty, 4K, ben
 single GPU): CUDA 310 → 169 / 230 fps; Vulkan with 1 queue 194 → 84 / 136 fps, with 8
 queues 180 → 60 / 113 fps. Nothing in the encoder changes the driver's time-slicing
 between processes; the queue count only matters for the 3090 at 4K, where one queue is
-better with or without a neighbour (`GAIL_VK_QUEUES=1`).
+better with or without a neighbor (`GAIL_VK_QUEUES=1`).
 
 ## Things that did not help (NVIDIA)
 
@@ -92,6 +92,6 @@ better with or without a neighbour (`GAIL_VK_QUEUES=1`).
 * Removing the integer modulo from the DWT lifting loops: no change (memory-bound).
 * FP16 / BF16 / TF32 DWT (including a 3×TF32 tensor-core matrix form): FP32 is already
   memory-bound (≈0.3 ms per 4K plane), so none of them is faster. FP16 and BF16 lose far too
-  much (quantised coefficients differ in 58 % / 73 % of the finest-band positions); plain
+  much (quantized coefficients differ in 58 % / 73 % of the finest-band positions); plain
   TF32 still differs in 22 %, and the 3×TF32 split that recovers FP32-class accuracy costs
   4× the time.

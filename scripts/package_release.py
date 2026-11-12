@@ -11,7 +11,7 @@ upload). For each, this writes OUT_DIR/libgail-<TAG>-<platform>.tar.gz (Linux, m
 * makes gail.pc relocatable: the prefix becomes the directory two levels above the file, and
   the -L paths of the machine that built it are dropped;
 * restores the executable bits and the library symlinks that the artifact upload loses;
-* adds the licence.
+* adds the license.
 """
 import hashlib
 import io
@@ -61,8 +61,8 @@ def collect(tree):
         if rel.startswith('bin/') or re.search(r'\.(so|dylib)', p.name):
             mode = 0o755
         entries.append((rel, 'file', data, mode))
-    licence = (ROOT / 'LICENSE').read_bytes()
-    entries.append(('LICENSE', 'file', licence, 0o644))
+    license = (ROOT / 'LICENSE').read_bytes()
+    entries.append(('LICENSE', 'file', license, 0o644))
     return entries
 
 

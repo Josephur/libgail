@@ -120,7 +120,7 @@ FrameLayout makeLayout(int width, int height, Profile profile, double baseStep) 
                 b.mu = mu;
                 b.delta = (float)(std::ldexp(1.0, Rb - eps) * (1.0 + mu / 2048.0));
                 b.Mb = L.guardBits + eps - 1;
-                if (b.Mb > 22) throw std::runtime_error("quantisation step too fine (more than 22 bitplanes)");
+                if (b.Mb > 22) throw std::runtime_error("quantization step too fine (more than 22 bitplanes)");
                 const double wc = ictSynthesisNorm(c);
                 b.weight = norm * norm * wc * wc;
                 L.bands.push_back(b);

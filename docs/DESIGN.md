@@ -3,7 +3,7 @@
 ## Pipeline
 
 ```
-FFmpeg decode ──► pinned input buffer ──► GPU: colour ─► 9/7 DWT ─► quantise ─► Tier-1 CM ─► order ─► MQ ─► compact
+FFmpeg decode ──► pinned input buffer ──► GPU: color ─► 9/7 DWT ─► quantize ─► Tier-1 CM ─► order ─► MQ ─► compact
  (native 4:2:0)        (per slot)          (YCbCr→X'Y'Z'   (lifting,   (dead-zone,   (warp per   (largest  (thread  (into mapped
                                             →DC shift→ICT)  6/5 levels) cblk layout)  code-block) first)    per cblk) host memory)
                                                                                                         │
@@ -18,7 +18,7 @@ other slots. A writer thread emits frames in order. Faster GPUs simply pull more
 (e.g. 381 vs 339 frames on the 3090 vs the 5060 Ti in a mixed run).
 
 The CPU backend runs the same stages with the reference implementations; GPU Tier-1
-output is **bit-identical** to it given the same quantised coefficients (tested for every
+output is **bit-identical** to it given the same quantized coefficients (tested for every
 code-block of 2K and 4K frames on both backends and both GPUs).
 
 ## DCI codestream
@@ -42,9 +42,9 @@ Only SOC, SIZ, COD, QCD, POC, COM, TLM, SOT, SOD and EOC markers are written. Th
 marker holds the text `GAIL <version>`, so a frame's encoder and build can be read from
 the codestream; it counts toward the frame's size limit.
 
-## Colour
+## Color
 
-Per pixel: Y'CbCr 4:2:0 / 4:2:2 / 4:4:4 → R'G'B' (bilinear chroma upsampling honouring
+Per pixel: Y'CbCr 4:2:0 / 4:2:2 / 4:4:4 → R'G'B' (bilinear chroma upsampling honoring
 the chroma location, limited/full range, BT.601/709/2020 matrix; planar G'B'R' is just
 reordered) → 16-bit index into a 64K-entry
 EOTF table (BT.1886, sRGB, PQ, HLG, linear) giving cd/m² → primaries matrix to CIE XYZ
@@ -57,15 +57,15 @@ input passes through exactly; an app 3D LUT replaces the managed steps. One sour
 with its parameters in a small float block. Details and the reasoning behind the
 defaults: [COLOR.md](COLOR.md).
 
-## Wavelet and quantisation
+## Wavelet and quantization
 
 Irreversible 9/7 lifting (Annex F constants; low-pass ×1/K, high-pass ×K) with
 whole-sample symmetric extension. Rows: one workgroup per row in shared memory. Columns:
 32×64 tiles with an 8-sample halo in shared memory; the halo absorbs the ±4-sample reach of
 the four lifting steps, so tiles are independent. Step sizes give every subband the same
 image-domain MSE per unit coefficient error: Δb = Δbase / ‖synthesis basis‖b, encoded as
-(ε, μ) and used exactly as signalled. Because power-of-two base steps produce nested
-quantisers, `--step 1/2/4` decode identically at DCI rates; larger steps only save
+(ε, μ) and used exactly as signaled. Because power-of-two base steps produce nested
+quantizers, `--step 1/2/4` decode identically at DCI rates; larger steps only save
 Tier-1 work. Coefficients are stored per code-block (1024 words) as sign-magnitude with 6
 extra fraction bits used for distortion estimates.
 
@@ -74,9 +74,9 @@ extra fraction bits used for distortion estimates.
 The coder (no mode switches, single MQ codeword per code-block, as DCI decoders expect)
 is split in two kernels.
 
-**Context modelling (`t1_cm`) — one 32-lane warp/subgroup per code-block.** Lane *x* owns
+**Context modeling (`t1_cm`) — one 32-lane warp/subgroup per code-block.** Lane *x* owns
 column *x*. Significance, sign, "refined" and "visited" state for its 32 rows live in four
-32-bit registers; neighbour columns come from subgroup shuffles, vertical neighbours are
+32-bit registers; neighbor columns come from subgroup shuffles, vertical neighbors are
 bit shifts. For each bitplane the three passes are evaluated stripe by stripe:
 
 * *Significance propagation* is the only pass with a causal dependency: a coefficient
@@ -90,7 +90,7 @@ bit shifts. For each bitplane the three passes are evaluated stripe by stripe:
 * *Cleanup* coded sets and new significance follow directly from the masks; only the
   contexts need "state at time of coding", which is a fixed combination of masks (left
   column incl. its new bits, right column without, above-in-column with, below without).
-  Run-length mode checks a 3×6 neighbourhood window.
+  Run-length mode checks a 3×6 neighborhood window.
 
 Every lane emits its column's symbols (≤10 per stripe and pass, packed 6 bits each into a
 64-bit register); a subgroup prefix sum puts them in scan order in shared memory, and each
@@ -102,7 +102,7 @@ symbol count, largest first (a one-workgroup counting sort), which shortens the 
 path and keeps similar-length blocks in the same warp (lane efficiency 64–72% → 99%).
 The coder is written branch-free: with a = A − Qe and exch = (a < Qe), both CODEMPS and
 CODELPS reduce to "C += Qe iff isMPS ≠ exch, else A = Qe"; the context moves to
-NMPS/NLPS only when renormalisation follows. Contexts hold their probability-table entry
+NMPS/NLPS only when renormalization follows. Contexts hold their probability-table entry
 (plus MPS bit) in shared memory so the coder state stays in registers. These two changes
 cut the kernel by ~20%.
 
@@ -151,7 +151,7 @@ component (and by POC for 4K) and back-patches TLM and Psot.
   RTX 3090 from 134 to ~190 fps at 2K; on the 3090 at 4K frames contend instead (101 →
   ~80 fps), where CUDA is the backend to use anyway. Event-based intra-frame sync
   (`GAIL_VK_EVENTS`) did not help on NVIDIA.
-* Tier-1: the context-modelling kernel quantises its code-block straight from the wavelet
+* Tier-1: the context-modeling kernel quantizes its code-block straight from the wavelet
   planes (no coefficient round trip through memory; the coefficient buffer is only filled
   for the debug taps and the CPU fallback). The MQ kernel codes 16 symbols per fully
   unrolled chunk and prefetches the next symbol's context state, keeping the shared-memory
@@ -171,7 +171,7 @@ component (and by POC for 4K) and back-patches TLM and Psot.
   process hits out-of-memory while the encoder keeps its 4 slots; with it, the encoder
   steps down to one slot and the other process gets ~2 GB more. On Linux the NVIDIA driver
   never evicts the encoder's own allocations (the *other* process fails), so this is about
-  being a good neighbour; on Windows, where WDDM shrinks budgets and pages, it also keeps
+  being a good neighbor; on Windows, where WDDM shrinks budgets and pages, it also keeps
   the encoder itself off the slow path.
 * Capacity overflows (pathological content exceeding the symbol / codeword buffers) are
   detected on the GPU and the frame's Tier-1 is redone on the CPU from the GPU's

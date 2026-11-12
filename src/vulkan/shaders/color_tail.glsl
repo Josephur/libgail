@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Shared end of the colour kernels: R'G'B' (0..1) -> X'Y'Z' codes via kernels/color_math.h,
+// Shared end of the color kernels: R'G'B' (0..1) -> X'Y'Z' codes via kernels/color_math.h,
 // optional X'Y'Z' tap, DC shift and ICT into the three wavelet input planes.
 F32Buf g_cp;
 F32Buf g_eotf;

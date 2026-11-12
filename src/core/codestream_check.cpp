@@ -143,7 +143,7 @@ CheckReport checkDciCodestream(const uint8_t* data, size_t size, double fps) {
             const uint32_t sq = rd.u8();
             r.guardBits = (int)(sq >> 5);
             r.qstyle = (int)(sq & 0x1F);
-            if (r.qstyle != 2) r.error("quantisation must be scalar expounded");
+            if (r.qstyle != 2) r.error("quantization must be scalar expounded");
             if (fourk && r.guardBits != 2) r.error("4K requires 2 guard bits");
             if (!fourk && r.guardBits != 1) r.error("2K requires 1 guard bit");
             const int nb = 3 * (fourk ? 6 : 5) + 1;

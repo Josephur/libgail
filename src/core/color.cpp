@@ -16,7 +16,7 @@ constexpr double kPqM2 = 2523.0 / 4096.0 * 128.0;
 constexpr double kPqC1 = 3424.0 / 4096.0;
 constexpr double kPqC2 = 2413.0 / 4096.0 * 32.0;
 constexpr double kPqC3 = 2392.0 / 4096.0 * 32.0;
-constexpr double kDciNorm = 52.37;  // SMPTE ST 428-1 normalising constant
+constexpr double kDciNorm = 52.37;  // SMPTE ST 428-1 normalizing constant
 
 struct XY {
     double x, y;
@@ -278,7 +278,7 @@ std::vector<float> readCubeLut(const std::string& path, int& size) {
 
 }  // namespace gail
 
-// The shared per-pixel maths (kernels/color_math.h) takes this converter's tables as
+// The shared per-pixel math (kernels/color_math.h) takes this converter's tables as
 // arguments, as the CUDA kernels do.
 #define CM_ARGS [[maybe_unused]] const float* cp, [[maybe_unused]] const float* eotf, [[maybe_unused]] const float* lut3,
 #define CM_PASS cp, eotf, lut3,

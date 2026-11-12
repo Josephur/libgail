@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Per-pixel colour handling shared by the CPU reference, the Vulkan (GLSL) and the CUDA
+// Per-pixel color handling shared by the CPU reference, the Vulkan (GLSL) and the CUDA
 // backends: source R'G'B' -> 12-bit DCI X'Y'Z' (SMPTE ST 428-1).
 //
 // Two routes:
@@ -65,9 +65,9 @@ GAIL_FN float cm_tone(CM_ARGS float y) {
     return v * CP(CP_PEAK);
 }
 
-// Pull a colour toward neutral grey of the same luminance until every target-gamut
+// Pull a color toward neutral gray of the same luminance until every target-gamut
 // channel lies in [0, 1] (no channel clips, so texture inside saturated highlights
-// survives); colours beyond THRESH of the way to the boundary are compressed smoothly.
+// survives); colors beyond THRESH of the way to the boundary are compressed smoothly.
 GAIL_FN void cm_gamut(CM_ARGS INOUT(float) X, INOUT(float) Y, INOUT(float) Z) {
     float r = CP(CP_XYZ2TGT + 0) * X + CP(CP_XYZ2TGT + 1) * Y + CP(CP_XYZ2TGT + 2) * Z;
     float g = CP(CP_XYZ2TGT + 3) * X + CP(CP_XYZ2TGT + 4) * Y + CP(CP_XYZ2TGT + 5) * Z;
@@ -148,10 +148,10 @@ GAIL_FN void cm_rgb_to_xyz12(CM_ARGS float r, float g, float b, INOUT(float) cx,
         float tb = CP(CP_XYZ2TGT + 6) * X + CP(CP_XYZ2TGT + 7) * Y + CP(CP_XYZ2TGT + 8) * Z;
         float pk = CP(CP_PEAK);
         if (CP(CP_TONE_NORM) > 1.5f) {
-            // per channel in the target gamut: bright saturated colours drift toward
+            // per channel in the target gamut: bright saturated colors drift toward
             // white as their channels approach the peak, the way film and SDR grades
             // render them. Channels below 0 (outside the gamut) are scaled like the
-            // brightest channel, so an out-of-gamut colour shrinks in proportion instead
+            // brightest channel, so an out-of-gamut color shrinks in proportion instead
             // of being dragged toward black by an uncompressed negative channel.
             float mx = FMAX(tr, FMAX(tg, tb)) * pk;
             float sneg = mx > 0.0f ? cm_tone(CM_PASS mx) / mx : 1.0f;

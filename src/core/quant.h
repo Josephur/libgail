@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Dead-zone scalar quantisation of wavelet coefficients into the code-block-major
+// Dead-zone scalar quantization of wavelet coefficients into the code-block-major
 // layout consumed by Tier-1 (1024 sign-magnitude words per code-block).
 #pragma once
 #include <cstdint>
@@ -15,7 +15,7 @@ void quantizeFrame(const FrameLayout& layout, const float* const planes[3], uint
 // independent, so callers may spread them over threads.
 void quantizeCodeBlock(const FrameLayout& layout, const float* const planes[3], int cblk, uint32_t* out);
 
-// Quantise one coefficient: sign-magnitude with kFracBits fractional bits, clamped
+// Quantize one coefficient: sign-magnitude with kFracBits fractional bits, clamped
 // so the integer part fits the band's Mb magnitude bitplanes.
 inline uint32_t quantizeCoeff(float v, float invDelta, uint32_t maxMag) {
     float a = v < 0 ? -v : v;

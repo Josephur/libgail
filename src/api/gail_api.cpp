@@ -178,7 +178,7 @@ ColorParams toColorParams(const gail_color& c) {
     p.gamutThreshold = c.gamut_threshold;
     if (!(p.sdrWhite > 0 && p.hdrPeak > 0 && p.hdrRefWhite > 0 && p.cinemaRefWhite > 0 && p.cinemaPeak > 0 &&
           p.cinemaPeak <= 52.37 && p.knee > 0 && p.knee < 1 && p.gamutThreshold >= 0 && p.gamutThreshold < 1))
-        throw ApiError(GAIL_ERROR_INVALID, "colour parameter out of range");
+        throw ApiError(GAIL_ERROR_INVALID, "color parameter out of range");
     switch (c.tone_map) {
     case GAIL_TONE_MAP_SIGNAL: p.toneMap = ToneMap::Signal; break;
     case GAIL_TONE_MAP_SHOULDER: p.toneMap = ToneMap::Shoulder; break;
@@ -206,7 +206,7 @@ ColorParams toColorParams(const gail_color& c) {
         p.lut3dData.assign(c.lut3d, c.lut3d + n);
         p.lut3dSize = c.lut3d_size;
     } else if (c.mode != GAIL_COLOR_MANAGED) {
-        throw ApiError(GAIL_ERROR_INVALID, "invalid colour mode");
+        throw ApiError(GAIL_ERROR_INVALID, "invalid color mode");
     }
     return p;
 }
@@ -272,7 +272,7 @@ struct gail_encoder {
     std::unique_ptr<PushSource> src;
     std::vector<std::unique_ptr<Device>> devices;
     std::thread thread;
-    std::atomic<bool> ended{false}, joined{false}, cancelled{false};
+    std::atomic<bool> ended{false}, joined{false}, canceled{false};
     std::mutex lifecycle;
 
     std::mutex metaMutex;
@@ -325,7 +325,7 @@ struct gail_encoder {
     }
 
     void deliver(const FrameStats& st, const std::vector<uint8_t>& cs) {
-        if (cancelled.load()) return;
+        if (canceled.load()) return;
         FrameMeta meta;
         {
             std::lock_guard<std::mutex> l(metaMutex);
@@ -390,7 +390,7 @@ struct gail_encoder {
                 std::memcpy(o, s, row);
                 continue;
             }
-            // 12-bit code -> 16-bit signal; the X'Y'Z' colour path maps it back exactly
+            // 12-bit code -> 16-bit signal; the X'Y'Z' color path maps it back exactly
             const bool msb = fmt == GAIL_PIX_XYZ12_MSB;
             for (int i = 0; i < picW * 3; ++i) {
                 const uint32_t v = std::min<uint32_t>(msb ? s[i] >> 4 : s[i], 4095u);
@@ -400,7 +400,7 @@ struct gail_encoder {
     }
 
     int send(const gail_frame* f, Waiter* w) {
-        if (cancelled.load()) return fail(GAIL_ERROR_CANCELLED, "cancelled");
+        if (canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
         if (failed.load()) return fail(GAIL_ERROR_FAILED, error);
         if (!f) {
             ended = true;
@@ -414,20 +414,20 @@ struct gail_encoder {
             if (!f->data[c]) return fail(GAIL_ERROR_INVALID, "frame plane missing");
         FrameMeta meta{f->opaque, w};
         const int r = src->push([&](uint8_t* dst) { fill(*f, dst); }, meta, metas, metaMutex);
-        if (r == GAIL_ERROR_FAILED && cancelled.load()) return fail(GAIL_ERROR_CANCELLED, "cancelled");
+        if (r == GAIL_ERROR_FAILED && canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
         if (r == GAIL_ERROR_FAILED) return fail(r, failed.load() ? error : "encoder stopped");
         if (r == GAIL_ERROR_STATE) return fail(r, "the stream has already ended");
         return r;
     }
 
     void cancel() {
-        if (cancelled.exchange(true)) return;
+        if (canceled.exchange(true)) return;
         bool done;
         {
             std::lock_guard<std::mutex> l(outMutex);
             done = pipelineDone;
         }
-        if (!done) log(GAIL_LOG_INFO, "cancelled");
+        if (!done) log(GAIL_LOG_INFO, "canceled");
         ended = true;
         if (src) src->abort();  // wakes the pipeline's readers and blocked sends
         failWaiters();
@@ -472,7 +472,7 @@ const char* gail_status_string(int s) {
     case GAIL_ERROR_NOMEM: return "out of memory";
     case GAIL_ERROR_FAILED: return "encoding failed";
     case GAIL_ERROR_STATE: return "not allowed in this state";
-    case GAIL_ERROR_CANCELLED: return "cancelled";
+    case GAIL_ERROR_CANCELLED: return "canceled";
     }
     return "unknown status";
 }
@@ -570,7 +570,7 @@ int gail_encoder_create(const gail_config* c, gail_encoder** encoder) {
     if (!encoder) return fail(GAIL_ERROR_INVALID, "encoder pointer is NULL");
     *encoder = nullptr;
     if (!c || c->struct_size < kConfigSizeV1)
-        return fail(GAIL_ERROR_INVALID, "config not initialised with gail_config_defaults()");
+        return fail(GAIL_ERROR_INVALID, "config not initialized with gail_config_defaults()");
     if (c->struct_size > sizeof(gail_config) &&
         !allZero(reinterpret_cast<const uint8_t*>(c) + sizeof(gail_config), c->struct_size - sizeof(gail_config)))
         return fail(GAIL_ERROR_UNSUPPORTED, std::string("the config uses settings this libgail (") + gail_version_string() +
@@ -644,7 +644,7 @@ int gail_encoder_create(const gail_config* c, gail_encoder** encoder) {
         } else {
             ff.kind = FrameFormat::Kind::RGB48;
         }
-        ColorConverter probe(es.color);  // validates the colour settings up front
+        ColorConverter probe(es.color);  // validates the color settings up front
         const FrameLayout L = makeLayout(e->width, e->height, profile, es.baseStep);
 
         static const char* names[] = {"auto", "cuda", "vulkan", "cpu"};
@@ -670,7 +670,7 @@ int gail_encoder_create(const gail_config* c, gail_encoder** encoder) {
         for (size_t d = 0; d < e->devices.size(); ++d) e->devicesDesc += (d ? ", " : "") + e->devices[d]->name();
         e->log(GAIL_LOG_INFO, "gail %s: %s %dx%d, %s", gail_version_string(), profileName(profile), e->width,
                e->height, e->devicesDesc.c_str());
-        e->log(GAIL_LOG_INFO, "colour: %s", probe.describe().c_str());
+        e->log(GAIL_LOG_INFO, "color: %s", probe.describe().c_str());
         static const double dciRates[] = {24, 25, 30, 48, 50, 60};  // SMPTE ST 429-2
         if (std::none_of(std::begin(dciRates), std::end(dciRates), [&](double r) { return std::fabs(cfg.fps - r) < 1e-3; }))
             e->log(GAIL_LOG_WARNING,
@@ -699,7 +699,7 @@ int gail_encoder_create(const gail_config* c, gail_encoder** encoder) {
         po.cpuThreads = cfg.cpu_threads;
         po.lowPriority = cfg.low_priority != 0;
         po.check = cfg.check != 0;
-        po.cancel = &e->cancelled;
+        po.cancel = &e->canceled;
         e->src = std::make_unique<PushSource>(es.input, (size_t)po.slotsPerDevice * e->devices.size() + 1);
         gail_encoder* raw = e.get();
         po.onError = [raw] { raw->src->abort(); };
@@ -767,8 +767,8 @@ int gail_encoder_receive(gail_encoder* e, gail_packet* pkt, int wait) {
     if (!e || !pkt) return fail(GAIL_ERROR_INVALID, "NULL argument");
     if (e->cfg.on_packet) return fail(GAIL_ERROR_STATE, "packets go to on_packet");
     std::unique_lock<std::mutex> l(e->outMutex);
-    if (wait) e->outCv.wait(l, [&] { return !e->out.empty() || e->pipelineDone || e->cancelled.load(); });
-    if (e->cancelled.load()) return fail(GAIL_ERROR_CANCELLED, "cancelled");
+    if (wait) e->outCv.wait(l, [&] { return !e->out.empty() || e->pipelineDone || e->canceled.load(); });
+    if (e->canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
     if (!e->out.empty()) {
         *pkt = e->out.front();
         e->out.pop_front();
@@ -786,9 +786,9 @@ int gail_encoder_encode(gail_encoder* e, const gail_frame* frame, gail_packet* p
     if (r != GAIL_OK) return r;
     std::unique_lock<std::mutex> l(w.m);
     w.cv.wait(l, [&] { return w.done; });
-    if (w.failed && e->cancelled.load()) {
+    if (w.failed && e->canceled.load()) {
         gail_packet_free(&w.pkt);
-        return fail(GAIL_ERROR_CANCELLED, "cancelled");
+        return fail(GAIL_ERROR_CANCELLED, "canceled");
     }
     if (w.failed) return fail(GAIL_ERROR_FAILED, e->failed.load() ? e->error : "encoder stopped");
     *pkt = w.pkt;
@@ -798,7 +798,7 @@ int gail_encoder_encode(gail_encoder* e, const gail_frame* frame, gail_packet* p
 int gail_encoder_finish(gail_encoder* e) {
     if (!e) return fail(GAIL_ERROR_INVALID, "encoder is NULL");
     e->join();
-    if (e->cancelled.load()) return fail(GAIL_ERROR_CANCELLED, "cancelled");
+    if (e->canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
     return e->failed.load() ? fail(GAIL_ERROR_FAILED, e->error) : GAIL_OK;
 }
 

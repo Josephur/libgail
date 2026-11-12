@@ -24,9 +24,9 @@
  * @file
  * JPEG 2000 encoder for DCI picture tracks (SMPTE ST 428-1 / ST 429-4) using libgail.
  * Every packet is one complete, DCI-compliant codestream (2K / 4K, 12-bit X'Y'Z',
- * CPRL, 9/7, under the 250 Mbit/s frame limit). The picture is centred in the DCI
+ * CPRL, 9/7, under the 250 Mbit/s frame limit). The picture is centered in the DCI
  * container chosen from its size (scale it first); R'G'B' / Y'CbCr input is converted
- * to X'Y'Z' on the GPU from the stream's colour tags, xyz12le is encoded as is.
+ * to X'Y'Z' on the GPU from the stream's color tags, xyz12le is encoded as is.
  */
 
 #include <gail/gail.h>
@@ -104,7 +104,7 @@ static void pick_container(AVCodecContext *avctx, LibGailContext *s, gail_profil
     }
 }
 
-static void map_colour(AVCodecContext *avctx, LibGailContext *s, gail_config *cfg)
+static void map_color(AVCodecContext *avctx, LibGailContext *s, gail_config *cfg)
 {
     gail_color *c = &cfg->color;
     switch (avctx->color_trc) {
@@ -197,7 +197,7 @@ static av_cold int libgail_init(AVCodecContext *avctx)
     }
     cfg.input.width = avctx->width;
     cfg.input.height = avctx->height;
-    map_colour(avctx, s, &cfg);
+    map_color(avctx, s, &cfg);
 
     cfg.backend = s->backend;
     if (s->devices && !strcmp(s->devices, "list")) {
@@ -242,7 +242,7 @@ static av_cold int libgail_init(AVCodecContext *avctx)
     int cw, ch;
     gail_encoder_frame_size(s->enc, &cw, &ch);
     if (cfg.input.format != GAIL_PIX_XYZ12_MSB && gail_color_describe(&cfg.color, desc, sizeof(desc)) > 0)
-        av_log(avctx, AV_LOG_INFO, "colour: %s\n", desc);
+        av_log(avctx, AV_LOG_INFO, "color: %s\n", desc);
     av_log(avctx, AV_LOG_INFO, "%s %dx%d in a %dx%d container, max %.0f Mbit/s, on %s\n",
            profile == GAIL_PROFILE_4K ? "4K" : "2K", avctx->width, avctx->height, cw, ch, cfg.max_mbps,
            gail_encoder_devices(s->enc));
@@ -329,7 +329,7 @@ static const AVOption options[] = {
         { "auto", "from the picture size", 0, AV_OPT_TYPE_CONST, { .i64 = -1 },               0, 0, VE, .unit = "profile" },
         { "2k",   NULL,                    0, AV_OPT_TYPE_CONST, { .i64 = GAIL_PROFILE_2K }, 0, 0, VE, .unit = "profile" },
         { "4k",   NULL,                    0, AV_OPT_TYPE_CONST, { .i64 = GAIL_PROFILE_4K }, 0, 0, VE, .unit = "profile" },
-    { "container", "DCI container the picture is centred in", OFFSET(container), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 2, VE, .unit = "container" },
+    { "container", "DCI container the picture is centered in", OFFSET(container), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 2, VE, .unit = "container" },
         { "auto",  "smallest that fits", 0, AV_OPT_TYPE_CONST, { .i64 = -1 },                  0, 0, VE, .unit = "container" },
         { "flat",  "1.85:1",             0, AV_OPT_TYPE_CONST, { .i64 = GAIL_CONTAINER_FLAT },  0, 0, VE, .unit = "container" },
         { "scope", "2.39:1",             0, AV_OPT_TYPE_CONST, { .i64 = GAIL_CONTAINER_SCOPE }, 0, 0, VE, .unit = "container" },
@@ -347,7 +347,7 @@ static const AVOption options[] = {
         { "shoulder", "scene-relative tone curve",                         0, AV_OPT_TYPE_CONST, { .i64 = GAIL_TONE_MAP_SHOULDER }, 0, 0, VE, .unit = "tonemap" },
         { "bt2390",   "ITU-R BT.2390 EETF",                                0, AV_OPT_TYPE_CONST, { .i64 = GAIL_TONE_MAP_BT2390 },   0, 0, VE, .unit = "tonemap" },
         { "none",     "absolute luminance, clipped",                       0, AV_OPT_TYPE_CONST, { .i64 = GAIL_TONE_MAP_NONE },     0, 0, VE, .unit = "tonemap" },
-    { "gamut", "compress colours into the projector gamut", OFFSET(gamut), AV_OPT_TYPE_INT, { .i64 = GAIL_GAMUT_NONE }, 0, 2, VE, .unit = "gamut" },
+    { "gamut", "compress colors into the projector gamut", OFFSET(gamut), AV_OPT_TYPE_INT, { .i64 = GAIL_GAMUT_NONE }, 0, 2, VE, .unit = "gamut" },
         { "none",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = GAIL_GAMUT_NONE },  0, 0, VE, .unit = "gamut" },
         { "p3d65", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = GAIL_GAMUT_P3D65 }, 0, 0, VE, .unit = "gamut" },
         { "dcip3", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = GAIL_GAMUT_DCIP3 }, 0, 0, VE, .unit = "gamut" },

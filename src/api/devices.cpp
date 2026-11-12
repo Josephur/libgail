@@ -26,7 +26,7 @@ std::string lower(std::string s) {
 }
 
 // UUID without the "GPU-" prefix, PCI bus ID with its domain, lower case.
-std::string normaliseId(const std::string& id) {
+std::string normalizeId(const std::string& id) {
     std::string s = lower(id);
     if (s.rfind("gpu-", 0) == 0) s = s.substr(4);
     if (std::count(s.begin(), s.end(), ':') == 1) s = "0000:" + s;
@@ -39,7 +39,7 @@ std::vector<int> resolve(const std::vector<DeviceInfo>& devices, const std::vect
     std::vector<int> out;
     missing.clear();
     for (const auto& id : ids) {
-        const std::string want = normaliseId(id);
+        const std::string want = normalizeId(id);
         int found = -1;
         if (!want.empty() && std::all_of(want.begin(), want.end(), ::isdigit)) {
             const int i = std::stoi(want);
@@ -47,7 +47,7 @@ std::vector<int> resolve(const std::vector<DeviceInfo>& devices, const std::vect
                 if (d.index == i) found = i;
         } else {
             for (const auto& d : devices)
-                if ((!d.uuid.empty() && normaliseId(d.uuid) == want) || (!d.pciBusId.empty() && normaliseId(d.pciBusId) == want))
+                if ((!d.uuid.empty() && normalizeId(d.uuid) == want) || (!d.pciBusId.empty() && normalizeId(d.pciBusId) == want))
                     found = d.index;
         }
         if (found < 0) {

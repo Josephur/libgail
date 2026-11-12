@@ -17,18 +17,18 @@ namespace gail {
 namespace {
 
 // Per-sample state word. Besides the usual flags it carries the counts of significant
-// neighbours (horizontal 0..2, vertical 0..2, diagonal 0..4), maintained when a sample
+// neighbors (horizontal 0..2, vertical 0..2, diagonal 0..4), maintained when a sample
 // becomes significant; the zero-coding context is then one table lookup instead of eight
-// neighbour reads, and "no significant neighbour" is a single mask test.
+// neighbor reads, and "no significant neighbor" is a single mask test.
 enum : uint16_t {
     F_SIG = 1,
     F_SGN = 2,
     F_VIS = 4,
     F_REF = 8,
-    F_H1 = 1 << 4,   // + one horizontal neighbour
-    F_V1 = 1 << 6,   // + one vertical neighbour
-    F_D1 = 1 << 8,   // + one diagonal neighbour
-    F_NBR = 0x7F0,   // all neighbour counts
+    F_H1 = 1 << 4,   // + one horizontal neighbor
+    F_V1 = 1 << 6,   // + one vertical neighbor
+    F_D1 = 1 << 8,   // + one diagonal neighbor
+    F_NBR = 0x7F0,   // all neighbor counts
 };
 
 struct ZcTable {

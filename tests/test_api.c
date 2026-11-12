@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* Library API test, compiled as C against include/gail/gail.h: every way of getting
    codestreams (pull, callback, blocking from several threads), every input format,
-   letterboxed pictures, cancelling, errors and the binary-compatibility rules. Uses
+   letterboxed pictures, canceling, errors and the binary-compatibility rules. Uses
    whatever devices are present (CPU fallback). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -238,7 +238,7 @@ static void test_threads(gail_config* cfg) {
     gail_encoder_destroy(e);
 }
 
-/* ---- cancelling ------------------------------------------------------------------------ */
+/* ---- canceling ------------------------------------------------------------------------ */
 typedef struct {
     gail_encoder* e;
     int w, h, sent, last, mode; /* mode 0: send forever; 1: encode forever */
@@ -263,10 +263,10 @@ static thread_ret THREAD_FN feed(void* arg) {
 typedef struct {
     gail_encoder* e;
     int calls;
-} canceller;
+} canceler;
 
 static void cancel_in_callback(void* user, const gail_packet* p) {
-    canceller* c = (canceller*)user;
+    canceler* c = (canceler*)user;
     if (c->calls++ == 1) gail_encoder_cancel(c->e);
     (void)p;
 }
@@ -306,7 +306,7 @@ static void test_cancel(gail_config* cfg) {
     }
 
     /* from inside on_packet */
-    canceller c = {NULL, 0};
+    canceler c = {NULL, 0};
     cfg->on_packet = cancel_in_callback;
     cfg->user = &c;
     const int r = gail_encoder_create(cfg, &c.e);
@@ -323,7 +323,7 @@ static void test_cancel(gail_config* cfg) {
     }
     CHECK(gail_encoder_finish(e) == GAIL_ERROR_CANCELLED, "cancel cb: finish: %s", gail_last_error());
     CHECK(c.calls >= 2 && c.calls < 40, "cancel cb: %d callbacks", c.calls);
-    printf("  %-14s cancelled in the 2nd callback: %d callbacks, %d sends\n", "cancel cb", c.calls, sent);
+    printf("  %-14s canceled in the 2nd callback: %d callbacks, %d sends\n", "cancel cb", c.calls, sent);
     free(px);
     gail_encoder_destroy(e);
 }
@@ -622,7 +622,7 @@ int main(void) {
     CHECK(gail_encoder_create(&cfg, &e) == GAIL_ERROR_INVALID && !e, "oversized picture accepted");
     printf("  rejected as expected: %s\n", gail_last_error());
     memset(&cfg, 0, sizeof cfg);
-    CHECK(gail_encoder_create(&cfg, &e) == GAIL_ERROR_INVALID, "uninitialised config accepted");
+    CHECK(gail_encoder_create(&cfg, &e) == GAIL_ERROR_INVALID, "uninitialized config accepted");
 
     printf(failures ? "%d FAILURES\n" : "all API tests passed\n", failures);
     return failures ? 1 : 0;

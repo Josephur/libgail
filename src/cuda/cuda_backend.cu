@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// CUDA backend: the same pipeline as the Vulkan backend (colour, 9/7 DWT,
-// quantisation, EBCOT Tier-1 context modelling + MQ coding), written with CUDA
+// CUDA backend: the same pipeline as the Vulkan backend (color, 9/7 DWT,
+// quantization, EBCOT Tier-1 context modeling + MQ coding), written with CUDA
 // warp intrinsics. Each slot owns a stream, so frames in flight overlap on the GPU;
 // input is decoded straight into pinned memory and results are compacted into
 // mapped host memory by the GPU.
@@ -38,7 +38,7 @@ __shared__ uint32_t s_tab[47];
 #define MQ_TAB(i) s_tab[i]
 #include "kernels/mq_encoder.h"
 #include "kernels/t1_common.h"
-// Colour maths shared with the CPU and Vulkan paths; tables reached through kernel pointers.
+// Color math shared with the CPU and Vulkan paths; tables reached through kernel pointers.
 #define CM_ARGS const float* __restrict__ cp, const float* __restrict__ eotf, const float* __restrict__ lut3,
 #define CM_PASS cp, eotf, lut3,
 #define CP(i) cp[i]
@@ -60,7 +60,7 @@ constexpr int MAX_PASSES = 64;
 constexpr int MAX_PLANES = 24;
 constexpr unsigned FULL = 0xFFFFFFFFu;
 
-// ---------------------------------------------------------------- colour
+// ---------------------------------------------------------------- color
 struct YuvParams {
     int width, aw, ah, ox, oy, bits, fullRange, chroma, sx, sy, rgb;
     float crR, cbG, crG, cbB;
@@ -168,7 +168,7 @@ __global__ void dwtRowsKernel(const float* __restrict__ src, float* __restrict__
         const int parity = (s & 1) ? 0 : 1;
         const float c = kLift[s];
         for (int i = threadIdx.x * 2 + parity; i < w; i += 2 * blockDim.x) {
-            // symmetric extension at the ends: the mirrored neighbour is row[1] / row[w-2]
+            // symmetric extension at the ends: the mirrored neighbor is row[1] / row[w-2]
             const int im = i > 0 ? i - 1 : 1, ip = i + 1 < w ? i + 1 : w - 2;
             row[i] += c * (row[im] + row[ip]);
         }
@@ -215,7 +215,7 @@ __global__ void dwtColsKernel(const float* __restrict__ src, float* __restrict__
     }
 }
 
-// ---------------------------------------------------------------- quantisation
+// ---------------------------------------------------------------- quantization
 struct CblkEntry {
     uint32_t band, ax, ay, packed;  // packed: w | h << 8 | orient << 16 | comp << 20
 };
@@ -245,11 +245,11 @@ __global__ void quantKernel(const float* __restrict__ planes, const CblkEntry* _
     coeffs[gid] = out;
 }
 
-// ---------------------------------------------------------------- Tier-1 context modelling
+// ---------------------------------------------------------------- Tier-1 context modeling
 constexpr int SUBGROUPS = 4, SYM_CAP = 2560;
 
 struct T1cmParams {
-    const float* planes;  // wavelet planes: the kernel quantises its block itself
+    const float* planes;  // wavelet planes: the kernel quantizes its block itself
     int stride, planeSize;
     const CblkEntry* cblks;
     const BandEntry* bands;
@@ -283,7 +283,7 @@ __global__ void __launch_bounds__(128) t1cmKernel(T1cmParams P) {
     const int w = ce.packed & 0xFF, h = (ce.packed >> 8) & 0xFF, orient = (ce.packed >> 16) & 0xF;
     uint32_t sgn = 0, colMax = 0;
     {
-        // dead-zone quantisation of this block (same arithmetic as quantKernel)
+        // dead-zone quantization of this block (same arithmetic as quantKernel)
         const BandEntry b = P.bands[ce.band];
         const float* src = P.planes + (size_t)((ce.packed >> 20) & 0xF) * P.planeSize + (size_t)ce.ay * P.stride + ce.ax + lane;
         for (int r = 0; r < 32; ++r) {
@@ -383,7 +383,7 @@ __global__ void __launch_bounds__(128) t1cmKernel(T1cmParams P) {
                     const uint32_t S = sig, SL = shUp(S), SR = shDown(S);
                     const uint32_t cand = ~S & SM;
                     const uint32_t nS = (S << 1) | (S >> 1) | SL | (SL << 1) | (SL >> 1) | SR | (SR << 1) | (SR >> 1);
-                    if (!__any_sync(FULL, cand & nS)) continue;  // no sample with a significant neighbour
+                    if (!__any_sync(FULL, cand & nS)) continue;  // no sample with a significant neighbor
                     uint32_t NEW = 0, E = 0, NL = 0;
                     for (;;) {
                         NL = shUp(NEW);
@@ -907,7 +907,7 @@ public:
             h = (h + 1) / 2;
         }
         CUCHECK(cudaEventRecord(ev_[3], st));
-        // Tier-1 quantises each block itself; the coefficient buffer is only filled for the
+        // Tier-1 quantizes each block itself; the coefficient buffer is only filled for the
         // debug taps (and by the CPU fallback).
         if (dbg && dbg->full) runQuant(st);
         CUCHECK(cudaEventRecord(ev_[4], st));

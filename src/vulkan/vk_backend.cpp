@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Vulkan compute backend: colour conversion, 9/7 DWT, quantisation and EBCOT
-// Tier-1 (context modelling + MQ coding) on any Vulkan 1.3 GPU.
+// Vulkan compute backend: color conversion, 9/7 DWT, quantization and EBCOT
+// Tier-1 (context modeling + MQ coding) on any Vulkan 1.3 GPU.
 //
 // Each EncoderSlot owns a full set of device buffers and a command buffer that is
 // recorded once and resubmitted for every frame, so several frames can be in
@@ -180,7 +180,7 @@ public:
             }
 
         // Several queues per family: each frame slot submits to its own queue, so the
-        // stage barriers of one frame do not serialise against other frames and their
+        // stage barriers of one frame do not serialize against other frames and their
         // kernels overlap on the GPU (hiding the serial MQ tail and small dispatches).
         // Measured with 4 frames in flight (1 / 2 / 8 queues): RTX 5060 Ti 4K 75 / 97 / 95
         // fps, 2K 132 / 205 / 232 fps; RTX 3090 2K 134 / 184 / 217 fps, but 4K 101 / 87 / 82
@@ -600,7 +600,7 @@ public:
         }
         if (flags || totalData > dataCap_ || totalPasses > passCap_) {
             // Capacity overflow (pathological content): redo Tier-1 on the CPU from the
-            // GPU-quantised coefficients so the output stays exact.
+            // GPU-quantized coefficients so the output stays exact.
             if (d_.log())
                 d_.log()(LogLevel::Warning, "vulkan: Tier-1 buffer overflow (flags " + std::to_string(flags) +
                                                "), using CPU fallback for this frame");
@@ -806,7 +806,7 @@ private:
         }
         stamp(cb, TS_DWT);
 
-        // Tier-1 quantises each block itself; the coefficient buffer is only filled for the
+        // Tier-1 quantizes each block itself; the coefficient buffer is only filled for the
         // debug taps (and by the CPU fallback).
         if (debug) {
             dispatch(cb, P_QUANT, quantPc(), n_ * kCblkArea / 256);
@@ -943,7 +943,7 @@ private:
     VulkanDevice::Queue* xferQueue_ = nullptr;
     std::vector<VkEvent> events_;
     size_t evIdx_ = 0, evBase_ = 0;
-    // Measured on NVIDIA: no gain over barriers (frames still serialise), so opt-in only.
+    // Measured on NVIDIA: no gain over barriers (frames still serialize), so opt-in only.
     bool useEvents_ = std::getenv("GAIL_VK_EVENTS") != nullptr;
 };
 

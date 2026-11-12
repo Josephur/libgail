@@ -21,7 +21,7 @@ verified by an independent checker.
 * **Profiles:** 2K (1998×1080 flat, 2048×858 scope, 2048×1080 full) and 4K
   (3996×2160, 4096×1716, 4096×2160), 12-bit X'Y'Z', 24/25/30/48… fps rate control
   under the 250 Mbit/s limit (230 Mbit/s target by default).
-* **Colour:** BT.709 / BT.2020 / P3 sources, SDR (BT.1886, sRGB) and HDR (PQ, HLG). HDR is
+* **Color:** BT.709 / BT.2020 / P3 sources, SDR (BT.1886, sRGB) and HDR (PQ, HLG). HDR is
   handled like DCP-o-matic by default; optional tone curves and soft gamut compression
   give a true HDR rendering. Also exact X'Y'Z' pass-through or an app-supplied 3D LUT; native Y'CbCr (4:2:0, 4:2:2,
   4:4:4) and planar R'G'B' are converted on the GPU, so FFmpeg only decodes. See [docs/COLOR.md](docs/COLOR.md).
@@ -114,7 +114,7 @@ Useful options (`gail-enc --help` for all): `--profile 2k|4k`, `--container flat
 `--hdr-peak NITS`, `--xyz-dir DIR` (encode raw 12-bit X'Y'Z' frames), `--dump-xyz N`
 (write the X'Y'Z' reference of every Nth frame for PSNR checks).
 
-Colour (see [docs/COLOR.md](docs/COLOR.md)): `--tonemap signal|shoulder|bt2390|none`,
+Color (see [docs/COLOR.md](docs/COLOR.md)): `--tonemap signal|shoulder|bt2390|none`,
 `--tone-norm channel|maxrgb|luminance`, `--ref-white-in N` / `--ref-white-out N` (203 → 16
 cd/m² by default), `--knee F`, `--cinema-peak N`, `--sdr-white N`, `--gamut none|p3d65|dcip3`,
 `--gamut-threshold F`, `--lut3d FILE.cube`.
@@ -158,7 +158,7 @@ independent decoders and verifiers, is in [docs/VALIDATION.md](docs/VALIDATION.m
 ## Documentation
 
 * [docs/DESIGN.md](docs/DESIGN.md) — pipeline, GPU Tier-1 design, rate control, multi-GPU
-* [docs/COLOR.md](docs/COLOR.md) — colour modes, tone map, gamut, how the defaults were chosen
+* [docs/COLOR.md](docs/COLOR.md) — color modes, tone map, gamut, how the defaults were chosen
 * [docs/LIBRARY.md](docs/LIBRARY.md) — the C library: building (Linux, Windows, macOS), linking, API
 * [integrations/ffmpeg](integrations/ffmpeg/README.md) — building FFmpeg with the `libgail` encoder
 * [docs/VALIDATION.md](docs/VALIDATION.md) — how compliance is verified, results
@@ -167,9 +167,9 @@ independent decoders and verifiers, is in [docs/VALIDATION.md](docs/VALIDATION.m
 
 Audio is out of scope (handled by a separate encoder).
 
-## Licence
+## License
 
-GAIL is released under the [MIT licence](LICENSE), copyright (c) 2026 Joseph Stackhouse.
+GAIL is released under the [MIT license](LICENSE), copyright (c) 2026 Joseph Stackhouse.
 Every source file carries an `SPDX-License-Identifier: MIT` line.
 
 * `integrations/ffmpeg/libgailenc.c` is additionally offered under FFmpeg's LGPL-2.1-or-later,

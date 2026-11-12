@@ -31,10 +31,10 @@ codestreams for every configuration that worked before). Pull request #5.
 * `gail-check` reports a file it cannot open as such, not as a malformed codestream. (#2)
 * `gail-bench` prints "missing value for ..." instead of aborting when the last option has
   no value. (#4)
-* `gail-enc` decodes untagged sources with one colour matrix on both input paths (BT.709
+* `gail-enc` decodes untagged sources with one color matrix on both input paths (BT.709
   for 720 lines or more, BT.601 below, BT.2020 when the primaries say so). Before, the
   RGB48 path (`--input-format rgb`) left the choice to FFmpeg's scaler, which takes BT.601
-  at any size, so the two paths gave different colours for the same clip. The matrix is
+  at any size, so the two paths gave different colors for the same clip. The matrix is
   printed in the source line, marked as assumed when the stream carries no tag. (#6)
 * A source frame that cannot be read (a short or unreadable `.xyz` file, an `ffmpeg` child
   that fails) stops the encode with an error instead of ending it silently with exit
@@ -44,6 +44,6 @@ codestreams for every configuration that worked before). Pull request #5.
 
 First release: DCI JPEG 2000 encoding (2K and 4K, 12-bit X'Y'Z', SMPTE ST 428-1 /
 ST 429-4) with EBCOT Tier-1 on the GPU through CUDA or Vulkan, a bit-exact CPU reference
-backend, multi-GPU pull scheduling, colour management for SDR and HDR sources, the C
+backend, multi-GPU pull scheduling, color management for SDR and HDR sources, the C
 library `libgail` with pull, callback and blocking APIs, the `gail-enc`, `gail-check` and
 `gail-bench` tools, and an FFmpeg encoder (`-c:v libgail`).

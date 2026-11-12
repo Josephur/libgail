@@ -180,7 +180,7 @@ static void testFrameCpu(Profile prof) {
                 10 * std::log10(4095.0 * 4095 / (rr.distortion / ((double)W * H * 3))),
                 formatReport(rep, true).c_str());
     CHECK(rep.ok, "frame not DCI compliant");
-    CHECK(rep.comment == codestreamLabel(), "frame not labelled as GAIL's");
+    CHECK(rep.comment == codestreamLabel(), "frame not labeled as GAIL's");
     const std::string path = std::string("/tmp/gail_test_") + (prof == Profile::Cinema4K ? "4k" : "2k") + ".j2c";
     FILE* f = std::fopen(path.c_str(), "wb");
     if (f) {
@@ -216,7 +216,7 @@ static void testGpu(Profile prof, bool cuda) {
         std::printf("  (skipped: no %s devices on this machine)\n", cuda ? "CUDA" : "Vulkan");
         return;
     }
-    // CPU reference for the colour/DWT stages
+    // CPU reference for the color/DWT stages
     auto cpu = createCpuDevice(0)->createSlot(L, es);
     Tier1Frame tc;
     FrameDebug dc;
@@ -236,7 +236,7 @@ static void testGpu(Profile prof, bool cuda) {
         }
         slot->encode(rgb.data(), tg, &tm, &dg);
         {
-            // Compare the GPU wavelet against the CPU transform of the GPU's own colour output.
+            // Compare the GPU wavelet against the CPU transform of the GPU's own color output.
             ColorConverter cc(es.color);
             std::vector<float> pl[3];
             for (auto& p : pl) p.resize((size_t)W * H);
@@ -265,7 +265,7 @@ static void testGpu(Profile prof, bool cuda) {
         for (size_t i = 0; i < dg.xyz12.size(); ++i) xyzDiff += dg.xyz12[i] != dc.xyz12[i];
         for (size_t i = 0; i < dg.coeffs.size(); ++i) {
             const int64_t a = dg.coeffs[i] & 0x7FFFFFFF, b = dc.coeffs[i] & 0x7FFFFFFF;
-            coefDiff += std::llabs(a - b) > 64;  // more than one quantisation step apart
+            coefDiff += std::llabs(a - b) > 64;  // more than one quantization step apart
         }
         std::printf("%s: xyz codes differing %zu / %zu, coefficients off by >1 step %zu / %zu\n", d->name().c_str(),
                     xyzDiff, dg.xyz12.size(), coefDiff, dg.coeffs.size());
@@ -388,7 +388,7 @@ static void testT1PassLimit() {
         const int limit = 1 + trial % std::max(1, full.numPasses - 1);
         T1Result lim;
         t1EncodeRef(c.data(), w, h, orient, lim, nullptr, limit);
-        CHECK(lim.numPasses == limit, "pass limit not honoured");
+        CHECK(lim.numPasses == limit, "pass limit not honored");
         for (int k = 1; k <= lim.numPasses; ++k) {
             auto ref = test::t1Decode(full.data.data(), full.data.size(), w, h, orient, full.nbps, k);
             auto got = test::t1Decode(lim.data.data(), lim.passLen[k - 1], w, h, orient, lim.nbps, k);
@@ -487,7 +487,7 @@ static void testPlanar() {
     int W, H;
     containerSize(prof, Container::Flat, W, H);
     const int aw = 1917, ah = 803;
-    // linear ramps: chroma interpolation reproduces them, so only quantisation remains
+    // linear ramps: chroma interpolation reproduces them, so only quantization remains
     auto rgbAt = [&](int x, int y, double out[3]) {
         out[0] = 0.05 + 0.9 * x / (aw - 1);
         out[1] = 0.05 + 0.9 * y / (ah - 1);
@@ -588,7 +588,7 @@ static void testPlanar() {
                 for (int k = 0; k < 3; ++k) maxErr = std::max(maxErr, std::fabs(o[k] / 65535.0 - c[k]));
             }
         const bool black = rgb[0] == 0 && rgb.back() == 0 && rgb[((size_t)(f.oy + 1) * W + f.ox - 1) * 3] == 0;
-        // quantisation (8-bit Y'CbCr: about 2.5 code values through the matrix) plus the
+        // quantization (8-bit Y'CbCr: about 2.5 code values through the matrix) plus the
         // half-row chroma offset at the top and bottom edges of 4:2:0
         const double tol = (l.rgb ? 0.6 : 3.0) / maxv + (l.sy ? 0.0015 : 0) + 1.0 / 65535;
         std::printf("  %-10s R'G'B' max error %.5f (tolerance %.5f)%s", l.name, maxErr, tol, black ? "" : " BORDER NOT BLACK");
@@ -605,7 +605,7 @@ static void testPlanar() {
     }
 }
 
-// Colour handling on the CPU reference: exact X'Y'Z' pass-through, in-memory 3D LUTs,
+// Color handling on the CPU reference: exact X'Y'Z' pass-through, in-memory 3D LUTs,
 // the tone-map variants on neutrals and the cinema peak.
 static void testColor() {
     {
@@ -656,7 +656,7 @@ static void testColor() {
     // is monotonic, and lands the source peak on the cinema peak.
     const ToneNorm norms[] = {ToneNorm::Channel, ToneNorm::MaxRGB, ToneNorm::Luminance};
     const char* names[] = {"channel", "maxrgb", "luminance"};
-    std::vector<int> greys[3];
+    std::vector<int> grays[3];
     for (int k = 0; k < 3; ++k) {
         ColorParams p;
         p.transfer = Transfer::PQ;
@@ -671,7 +671,7 @@ static void testColor() {
             cc.toXYZ12((uint16_t)i, (uint16_t)i, (uint16_t)i, out);
             nonMono += out[1] < prev;
             prev = out[1];
-            greys[k].push_back(out[1]);
+            grays[k].push_back(out[1]);
         }
         int peak[3];
         cc.toXYZ12((uint16_t)std::lround(pqInverseEotf(1000) * 65535), (uint16_t)std::lround(pqInverseEotf(1000) * 65535),
@@ -683,12 +683,12 @@ static void testColor() {
         CHECK(std::abs(peak[1] - want) <= 2, "%s: source peak lands on %d, not %d", names[k], peak[1], want);
     }
     int diff = 0;
-    for (size_t i = 0; i < greys[0].size(); ++i)
-        diff = std::max({diff, std::abs(greys[0][i] - greys[1][i]), std::abs(greys[0][i] - greys[2][i])});
+    for (size_t i = 0; i < grays[0].size(); ++i)
+        diff = std::max({diff, std::abs(grays[0][i] - grays[1][i]), std::abs(grays[0][i] - grays[2][i])});
     CHECK(diff <= 1, "tone-map variants disagree on neutrals by %d codes", diff);
 }
 
-// GPU colour kernels against the CPU reference for every colour mode (an HDR source
+// GPU color kernels against the CPU reference for every color mode (an HDR source
 // exercises the tone map and gamut stages; the frame tests use SDR patterns).
 static void testGpuColor(bool cuda) {
     const int W = 1998, H = 1080;
@@ -774,7 +774,7 @@ static void testGpuColor(bool cuda) {
             }
             // off-by-one rounding only; BT.2390 goes through PQ and back (two chained pow()
             // in float, fast-math on the GPU), which rounds differently on ~1% of codes
-            CHECK(maxd <= 1 && differ * 50 < (size_t)W * H * 3, "%s colour on %s deviates from the CPU", m.name,
+            CHECK(maxd <= 1 && differ * 50 < (size_t)W * H * 3, "%s color on %s deviates from the CPU", m.name,
                   d->name().c_str());
         }
     }
@@ -1039,7 +1039,7 @@ static void testFaults() {
         CHECK(err.find("sink failed") != std::string::npos && delivered == 2, "sink failure: error \"%s\", %lld frames",
               err.c_str(), delivered);
     }
-    // cancelled from another thread after the first frame: returns without an error
+    // canceled from another thread after the first frame: returns without an error
     {
         std::vector<std::unique_ptr<Device>> devs;
         devs.push_back(faulty(-1, 99));
@@ -1060,7 +1060,7 @@ static void testFaults() {
         po.cancel = nullptr;
         CHECK(err.empty() && sum.frames < 400 && delivered == sum.frames, "cancel: error \"%s\", %lld frames", err.c_str(),
               sum.frames);
-        std::printf("  cancelled after the 1st frame: %lld frames, back in %.0f ms\n", sum.frames, ms);
+        std::printf("  canceled after the 1st frame: %lld frames, back in %.0f ms\n", sum.frames, ms);
     }
 }
 

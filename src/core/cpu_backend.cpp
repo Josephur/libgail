@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// CPU backend: reference implementation of the whole Tier-1 pipeline, parallelised
+// CPU backend: reference implementation of the whole Tier-1 pipeline, parallelized
 // over rows / column strips / code-blocks on a persistent thread pool.
 #include <atomic>
 #include <chrono>
@@ -171,7 +171,7 @@ public:
         const int n = L_.numCblks();
         out.info.assign(n, CblkInfo{});
         res_.resize(n);
-        // Each code-block is quantised and coded by the same thread, straight from cache.
+        // Each code-block is quantized and coded by the same thread, straight from cache.
         const float thr = (float)slopeThresh_;
         pool_->run(n, [&](int i) {
             const CodeBlock& cb = L_.cblks[i];
@@ -181,7 +181,7 @@ public:
             t1EncodeRef(q, cb.w, cb.h, L_.bands[cb.band].orient, res_[i], nullptr, kMaxPasses, &stop);
         });
         if (dbg) dbg->coeffs = coeffs_;
-        const auto t3 = t2;  // quantisation is part of the Tier-1 stage here
+        const auto t3 = t2;  // quantization is part of the Tier-1 stage here
         size_t total = 0, passes = 0;
         for (auto& r : res_) {
             total += r.data.size();
