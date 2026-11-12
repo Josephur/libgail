@@ -63,6 +63,7 @@ add_library(gail_core STATIC
   src/core/codestream_parse.cpp
   src/core/t2_parse.cpp
   src/core/cpu_backend.cpp
+  src/core/cpu_decode_backend.cpp
   src/core/pipeline.cpp
 )
 target_include_directories(gail_core PUBLIC src)

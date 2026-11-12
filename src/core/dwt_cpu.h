@@ -28,6 +28,10 @@ void fdwt97_2d(float* plane, int width, int height, int levels);
 // The same for several planes of equal size at once; the rows and column strips of all
 // planes are distributed with `par` (nullptr: this thread). Bit-identical to the above.
 void fdwt97_2d(float* const* planes, int nplanes, int width, int height, int levels, const ParallelFor* par);
+// Inverse of the above, in place. The top `skip` levels are left undone: the top-left
+// ceil(width / 2^skip) x ceil(height / 2^skip) samples are then the picture at that
+// reduced size.
+void idwt97_2d(float* const* planes, int nplanes, int width, int height, int levels, int skip, const ParallelFor* par);
 // Inverse of fdwt97_2d (double precision helper used for tests / norms).
 void idwt97_2d(double* plane, int width, int height, int levels);
 

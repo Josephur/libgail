@@ -20,6 +20,7 @@
 #include "core/bitio.h"
 #include "core/codestream_check.h"
 #include "core/codestream_parse.h"
+#include "core/decode_backend.h"
 #include "core/dwt_cpu.h"
 #include "core/frame_source.h"
 #include "core/pipeline.h"
@@ -1644,6 +1645,99 @@ static void testT1Decode() {
     }
 }
 
+static double psnr12(const uint16_t* a, const uint16_t* b, size_t n, int* maxDiff = nullptr) {
+    double se = 0;
+    int worst = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const int d = (int)a[i] - (int)b[i];
+        se += (double)d * d;
+        worst = std::max(worst, std::abs(d));
+    }
+    if (maxDiff) *maxDiff = worst;
+    return se == 0 ? 99.0 : 10 * std::log10(4095.0 * 4095.0 * (double)n / se);
+}
+
+// Encode a frame, decode its codestream on the CPU, and get the picture back: as close as
+// the encoder's own estimate says, in both word alignments, into a buffer with padded
+// rows, and at half and quarter size.
+static void testDecodeCpu(Profile prof) {
+    const EncodedFrame f = encodeCpuFrame(prof);
+    const int W = f.L.width, H = f.L.height;
+    StreamHeader h;
+    std::string err;
+    CHECK(parseCodestream(f.cs.data(), f.cs.size(), false, h, err) && h.supported, "parse: %s %s", err.c_str(), h.unsupported.c_str());
+    const FrameLayout L = layoutFor(h);
+    std::vector<CblkCode> blk;
+    CHECK(parsePackets(f.cs.data(), h, L, L.levels, blk, err), "packets: %s", err.c_str());
+    auto pool = std::make_shared<ThreadPool>(usableCpuCount(), false);
+
+    DecodeSettings ds;
+    ds.highBits = false;
+    auto slot = createCpuDecoderSlot(L, ds, pool);
+    std::vector<uint16_t> out((size_t)W * H * 3);
+    DecodeTimings tm;
+    slot->decode(f.cs.data(), f.cs.size(), blk, out.data(), (ptrdiff_t)W * 6, &tm);
+    int maxd = 0;
+    const double psnr = psnr12(out.data(), f.xyz12.data(), out.size(), &maxd);
+    const double est = 10 * std::log10(4095.0 * 4095 / (f.rr.distortion / ((double)W * H * 3)));
+    std::printf("  %s decode: PSNR %.2f dB against the source (encoder's estimate %.2f), max diff %d; Tier-1 %.1f ms, wavelet %.1f, "
+                "color %.1f\n", profileName(prof), psnr, est, maxd, tm.t1, tm.dwt, tm.color);
+    CHECK(psnr > est - 1.0 && psnr > 40.0, "decoded picture is %.2f dB from the source, encoder estimated %.2f", psnr, est);
+
+    // a second frame through the same slot: nothing left over from the first
+    std::vector<uint16_t> again((size_t)W * H * 3);
+    slot->decode(f.cs.data(), f.cs.size(), blk, again.data(), (ptrdiff_t)W * 6, nullptr);
+    CHECK(again == out, "decoding the same frame twice gave different pictures");
+
+    // codes in the high bits, rows 10 bytes longer than the picture
+    ds.highBits = true;
+    auto hi = createCpuDecoderSlot(L, ds, pool);
+    const ptrdiff_t stride = (ptrdiff_t)W * 6 + 10;
+    std::vector<uint8_t> padded((size_t)stride * H, 0xA5);
+    hi->decode(f.cs.data(), f.cs.size(), blk, padded.data(), stride, nullptr);
+    int wrong = 0, touched = 0;
+    for (int y = 0; y < H; ++y) {
+        const uint16_t* row = (const uint16_t*)(padded.data() + (size_t)y * stride);
+        for (int i = 0; i < W * 3; ++i) wrong += row[i] != (uint16_t)(out[(size_t)y * W * 3 + i] << 4);
+        for (int i = 0; i < 10; ++i) touched += padded[(size_t)y * stride + (size_t)W * 6 + i] != 0xA5;
+    }
+    CHECK(wrong == 0, "high-bit output differs from low-bit output shifted, %d words", wrong);
+    CHECK(touched == 0, "%d padding bytes written", touched);
+
+    // reduced size: the low-pass band of the full picture, so transforming the decoded
+    // picture forward again must land on it
+    for (int reduce = 1; reduce <= 2; ++reduce) {
+        std::vector<float> ref[3];
+        for (auto& p : ref) p.resize((size_t)W * H);
+        for (size_t i = 0; i < (size_t)W * H; ++i)
+            ictForward((float)(out[3 * i] - 2048), (float)(out[3 * i + 1] - 2048), (float)(out[3 * i + 2] - 2048), ref[0][i],
+                       ref[1][i], ref[2][i]);
+        for (auto& p : ref) fdwt97_2d(p.data(), W, H, reduce);
+        ds.highBits = false;
+        ds.reduce = reduce;
+        std::vector<CblkCode> low;
+        CHECK(parsePackets(f.cs.data(), h, L, L.levels - reduce, low, err), "packets: %s", err.c_str());
+        auto small = createCpuDecoderSlot(L, ds, pool);
+        int w, hh;
+        decodedSize(L, reduce, w, hh);
+        CHECK(w == (W + (1 << reduce) - 1) >> reduce && hh == (H + (1 << reduce) - 1) >> reduce, "reduced size %dx%d", w, hh);
+        std::vector<uint16_t> got((size_t)w * hh * 3), want((size_t)w * hh * 3);
+        small->decode(f.cs.data(), f.cs.size(), low, got.data(), (ptrdiff_t)w * 6, nullptr);
+        for (int y = 0; y < hh; ++y)
+            for (int x = 0; x < w; ++x) {
+                // the low-pass band sits in the top-left corner of the full-width plane
+                const size_t i = (size_t)y * W + x;
+                const float y0 = ref[0][i], y1 = ref[1][i], y2 = ref[2][i];
+                const float v[3] = {y0 + 1.402f * y2, y0 - 0.34413f * y1 - 0.71414f * y2, y0 + 1.772f * y1};
+                for (int k = 0; k < 3; ++k)
+                    want[((size_t)y * w + x) * 3 + k] = (uint16_t)std::clamp((int)std::floor(v[k] + 2048.5f), 0, 4095);
+            }
+        const double p = psnr12(got.data(), want.data(), got.size(), &maxd);
+        std::printf("  reduce %d: %dx%d, %.2f dB against the low-pass band of the full decode, max diff %d\n", reduce, w, hh, p, maxd);
+        CHECK(p > 55.0, "reduce %d: %.2f dB from the full picture's low-pass band", reduce, p);
+    }
+}
+
 // The shared thread pool: every index handed out once, concurrent run() calls take turns,
 // and a job's exception reaches the caller without wedging the pool.
 static void testThreadPool() {
@@ -1704,6 +1798,8 @@ int main(int argc, char** argv) {
     run("geometry", testGeometry);
     run("parse2k", [] { testParse(Profile::Cinema2K, Container::Flat); });
     run("parse4k", [] { testParse(Profile::Cinema4K, Container::Scope); });
+    run("decode2k", [] { testDecodeCpu(Profile::Cinema2K); });
+    run("decode4k", [] { testDecodeCpu(Profile::Cinema4K); });
     run("dwt", testDwtRoundTrip);
     run("norms", testNorms);
     run("t1", testT1Truncation);
