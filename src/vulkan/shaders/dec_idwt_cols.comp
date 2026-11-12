@@ -1,0 +1,76 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Vertical 9/7 synthesis on 32-column x 64-row tiles: dwt_cols.comp backwards. Each tile
+// is loaded interleaved from the low and high halves with an 8-row symmetric-extension
+// halo, the four lifting steps are undone in shared memory, and the interior rows are
+// written to dst.
+#include "common.glsl"
+#define GAIL_GLSL 1
+#include "kernels/dwt97.h"
+
+layout(local_size_x = 32, local_size_y = 8) in;
+
+layout(push_constant) uniform PC {
+    uint64_t src;
+    uint64_t dst;
+    uint stride;
+    uint planeSize;
+    uint w, h;
+};
+
+#define TILE 64
+#define HALO 8
+#define ROWS (TILE + 2 * HALO)
+
+shared float tile[ROWS][33];
+
+const float K = float(DWT97_K);
+
+int mirror(int i, int n) {
+    int period = 2 * (n - 1);
+    if (i < 0) i = -i;  // GLSL leaves % of negative operands undefined
+    i = i % period;
+    return i < n ? i : period - i;
+}
+
+void main() {
+    uint lx = gl_LocalInvocationID.x, ly = gl_LocalInvocationID.y;
+    uint x = gl_WorkGroupID.x * 32u + lx;
+    int y0 = int(gl_WorkGroupID.y) * TILE;
+    uint comp = gl_WorkGroupID.z;
+    int n = int(h);
+    F32Buf S = F32Buf(src);
+    F32Buf D = F32Buf(dst);
+    uint base = comp * planeSize + x;
+    bool col = x < w;
+    if (n == 1) {
+        if (col && ly == 0u && y0 == 0) D.v[base] = S.v[base];
+        return;
+    }
+    uint sn = (h + 1u) / 2u;
+    for (int r = int(ly); r < ROWS; r += 8) {
+        // sample y of the interleaved column: even ones from the low half, odd from the high
+        int y = mirror(y0 - HALO + r, n);
+        float v = 0.0;
+        if (col) v = (y & 1) == 0 ? S.v[base + uint(y / 2) * stride] * K : S.v[base + (sn + uint(y / 2)) * stride] * (1.0 / K);
+        tile[r][lx] = v;
+    }
+    barrier();
+    // tile row r holds sample y0 - HALO + r; y0 and HALO are even, so parity(r) = parity(sample)
+    for (int step = 0; step < 4; ++step) {
+        int parity = step & 1;
+        float c = step == 0 ? float(-(DWT97_DELTA))
+                            : (step == 1 ? float(-(DWT97_GAMMA)) : (step == 2 ? float(-(DWT97_BETA)) : float(-(DWT97_ALPHA))));
+        for (int r = parity + 2 * int(ly); r < ROWS - 1; r += 16) {
+            if (r == 0) continue;
+            tile[r][lx] += c * (tile[r - 1][lx] + tile[r + 1][lx]);
+        }
+        barrier();
+    }
+    if (!col) return;
+    for (int r = HALO + int(ly); r < HALO + TILE; r += 8) {
+        int y = y0 - HALO + r;
+        if (y >= n) break;
+        D.v[base + uint(y) * stride] = tile[r][lx];
+    }
+}

@@ -11,8 +11,8 @@
 //
 // The including code defines, besides what mq_decoder.h needs:
 //   T1D_OUT_T            type of the handle to the block's output
-//   T1D_WR(out, i, v)    store word v for sample i = 32 * row + column
-//   T1D_RD(out, i)       read it back
+//   T1D_WR(dst, i, v)    store word v for sample i = 32 * row + column
+//   T1D_RD(dst, i)       read it back
 //   T1D_ZC(i)            zero-coding context for orientation o and a 3x3 neighborhood n:
 //                        i = 512 * o + n, where bits 0..2 of n are columns x-1, x, x+1 of
 //                        the row above, bits 3..5 the sample's own row, bits 6..8 the row below
@@ -51,10 +51,10 @@ struct T1dState {
                   (((Su >> x) & 1u) << 4) | (((Gu >> x) & 1u) << 5) | (((Sd >> x) & 1u) << 6) |        \
                   (((Gd >> x) & 1u) << 7);                                                             \
         U32 sc = T1D_SC(sci);                                                                          \
-        U32 neg = mqd_decode(q, sc & 15u, in) ^ (sc >> 7);                                             \
+        U32 neg = mqd_decode(q, sc & 15u, cs) ^ (sc >> 7);                                             \
         Sm |= bit;                                                                                     \
         if (neg != 0u) Gm |= bit;                                                                      \
-        T1D_WR(out, (y0 + TO_U32(k)) * 32u + x, (neg << 31) | (3u << p));                              \
+        T1D_WR(dst, (y0 + TO_U32(k)) * 32u + x, (neg << 31) | (3u << p));                              \
     }
 
 // Significance propagation (D.3.1): not yet significant, with a significant neighbor.
@@ -62,7 +62,7 @@ struct T1dState {
     if ((rm & bit) != 0u && (Sm & bit) == 0u) {                                                        \
         U32 zi = T1D_ZCIDX(Su, Sm, Sd);                                                                \
         if (zi != 0u) {                                                                                \
-            U32 dbit = mqd_decode(q, T1D_ZC(zcBase + zi), in);                                         \
+            U32 dbit = mqd_decode(q, T1D_ZC(zcBase + zi), cs);                                         \
             Vk |= bit;                                                                                 \
             if (dbit != 0u) {                                                                          \
                 T1D_BECOME_SIG(k, Su, Sm, Sd, Gu, Gm, Gd)                                              \
@@ -77,10 +77,10 @@ struct T1dState {
     if ((Sm & ~Vk & bit) != 0u) {                                                                      \
         U32 nb = T1D_NB3(Su, x) | T1D_NB3(Sd, x) | (T1D_NB3(Sm, x) & 5u);                              \
         U32 cx = (Rk & bit) != 0u ? 16u : (nb != 0u ? 15u : 14u);                                      \
-        U32 dbit = mqd_decode(q, cx, in);                                                              \
+        U32 dbit = mqd_decode(q, cx, cs);                                                              \
         U32 oi = (y0 + TO_U32(k)) * 32u + x;                                                           \
-        U32 word = T1D_RD(out, oi);                                                                    \
-        T1D_WR(out, oi, dbit != 0u ? word + (1u << p) : word - (1u << p));                             \
+        U32 word = T1D_RD(dst, oi);                                                                    \
+        T1D_WR(dst, oi, dbit != 0u ? word + (1u << p) : word - (1u << p));                             \
         Rk |= bit;                                                                                     \
     }
 
@@ -88,18 +88,18 @@ struct T1dState {
 #define T1D_CUP_ROW(k, uk, Su, Sm, Sd, Gu, Gm, Gd)                                                     \
     if (TO_U32(k) >= k0 && (uk & bit) != 0u) {                                                         \
         U32 dbit = 1u;                                                                                 \
-        if (TO_U32(k) != forced) dbit = mqd_decode(q, T1D_ZC(zcBase + T1D_ZCIDX(Su, Sm, Sd)), in);     \
+        if (TO_U32(k) != forced) dbit = mqd_decode(q, T1D_ZC(zcBase + T1D_ZCIDX(Su, Sm, Sd)), cs);     \
         if (dbit != 0u) {                                                                              \
             T1D_BECOME_SIG(k, Su, Sm, Sd, Gu, Gm, Gd)                                                  \
-            any |= bit;                                                                                \
+            anySig |= bit;                                                                                \
         }                                                                                              \
     }
 
 // Decodes the first npasses coding passes of a w x h block (1..32 each) with nbps
 // bit-planes (1..30); q must have been set up with mqd_init() for the block's bytes.
 // Whatever the arguments, nothing outside the block's own 32 x 32 words is written.
-GAIL_FN void t1d_decode_block(INOUT(T1dState) st, INOUT(MqDec) q, MQD_IN_T in, U32 w, U32 h, U32 orient, U32 nbps,
-                              U32 npasses, T1D_OUT_T out) {
+GAIL_FN void t1d_decode_block(INOUT(T1dState) st, INOUT(MqDec) q, MQD_IN_T cs, U32 w, U32 h, U32 orient, U32 nbps,
+                              U32 npasses, T1D_OUT_T dst) {
     if (w == 0u || h == 0u || w > 32u || h > 32u || nbps == 0u || nbps > 30u || npasses == 0u) return;
     if (npasses > 3u * nbps - 2u) npasses = 3u * nbps - 2u;
     U32 zcBase = (orient & 3u) * 512u;
@@ -174,18 +174,18 @@ GAIL_FN void t1d_decode_block(INOUT(T1dState) st, INOUT(MqDec) q, MQD_IN_T in, U
                 U32 u0 = ~S1 & ~st.vis[y0] & rm0, u1 = ~S2 & ~st.vis[y0 + 1u] & rm1, u2 = ~S3 & ~st.vis[y0 + 2u] & rm2,
                     u3 = ~S4 & ~st.vis[y0 + 3u] & rm3;
                 U32 full = ylen == 4u ? (u0 & u1 & u2 & u3) : 0u;
-                U32 any = S0 | S1 | S2 | S3 | S4 | S5;
+                U32 anySig = S0 | S1 | S2 | S3 | S4 | S5;
                 U32 colmask = u0 | u1 | u2 | u3;
                 while (colmask != 0u) {
                     U32 x = TO_U32(FIND_LSB(colmask));
                     U32 bit = 1u << x;
                     colmask &= ~bit;
                     U32 k0 = 0u, forced = 99u;
-                    if ((full & bit) != 0u && T1D_NB3(any, x) == 0u) {
+                    if ((full & bit) != 0u && T1D_NB3(anySig, x) == 0u) {
                         // run-length mode: four untouched samples with no significant neighbor
-                        if (mqd_decode(q, TO_U32(MQ_CTX_RL), in) == 0u) continue;
-                        k0 = mqd_decode(q, TO_U32(MQ_CTX_UNI), in) << 1;
-                        k0 |= mqd_decode(q, TO_U32(MQ_CTX_UNI), in);
+                        if (mqd_decode(q, TO_U32(MQ_CTX_RL), cs) == 0u) continue;
+                        k0 = mqd_decode(q, TO_U32(MQ_CTX_UNI), cs) << 1;
+                        k0 |= mqd_decode(q, TO_U32(MQ_CTX_UNI), cs);
                         forced = k0;
                     }
                     T1D_CUP_ROW(0, u0, S0, S1, S2, G0, G1, G2)

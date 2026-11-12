@@ -5,7 +5,7 @@
 // The including code must define:
 //   MQD_IN_T           type of the handle to the compressed bytes (pointer in C++/CUDA,
 //                      base index in GLSL)
-//   MQD_BYTE(in, i)    the byte at index i (as U32); only called with i below the end
+//   MQD_BYTE(cs, i)    the byte at index i (as U32); only called with i below the end
 //                      given to mqd_init()
 // and may define:
 //   MQD_CTX(d, cx)     lvalue holding context cx's state (default: d.ctx[cx])
@@ -39,13 +39,13 @@ struct MqDec {
 #endif
 };
 
-#define MQD_AT(d, in, i) ((i) < d.end ? MQD_BYTE(in, i) : 0xFFu)
+#define MQD_AT(d, cs, i) ((i) < d.end ? MQD_BYTE(cs, i) : 0xFFu)
 
 // BYTEIN (C.3.4): after a 0xFF the next byte brings 7 bits, and a byte above 0x8F there
 // is a marker, which is not consumed and feeds ones from then on.
-GAIL_FN void mqd_bytein(INOUT(MqDec) d, MQD_IN_T in) {
-    U32 b = MQD_AT(d, in, d.bp);
-    U32 b1 = MQD_AT(d, in, d.bp + 1u);
+GAIL_FN void mqd_bytein(INOUT(MqDec) d, MQD_IN_T cs) {
+    U32 b = MQD_AT(d, cs, d.bp);
+    U32 b1 = MQD_AT(d, cs, d.bp + 1u);
     if (b == 0xFFu) {
         if (b1 > 0x8Fu) {
             d.C += 0xFF00u;
@@ -64,11 +64,11 @@ GAIL_FN void mqd_bytein(INOUT(MqDec) d, MQD_IN_T in) {
 
 // INITDEC (C.3.5) for the codeword in bytes [start, start + len), with the context
 // states Annex D starts every code-block from (Table D.7).
-GAIL_FN void mqd_init(INOUT(MqDec) d, MQD_IN_T in, U32 start, U32 len) {
+GAIL_FN void mqd_init(INOUT(MqDec) d, MQD_IN_T cs, U32 start, U32 len) {
     d.bp = start;
     d.end = start + len;
-    d.C = MQD_AT(d, in, d.bp) << 16;
-    mqd_bytein(d, in);
+    d.C = MQD_AT(d, cs, d.bp) << 16;
+    mqd_bytein(d, cs);
     d.C <<= 7;
     d.CT -= 7;
     d.A = 0x8000u;
@@ -82,7 +82,7 @@ GAIL_FN void mqd_init(INOUT(MqDec) d, MQD_IN_T in, U32 start, U32 len) {
 // the more probable symbol with no renormalization, returns after one context read. The
 // rest is one path for both symbols, so threads of a GPU warp stay together, and it
 // shifts by as many bits at a time as the byte in hand allows.
-GAIL_FN U32 mqd_decode(INOUT(MqDec) d, U32 cx, MQD_IN_T in) {
+GAIL_FN U32 mqd_decode(INOUT(MqDec) d, U32 cx, MQD_IN_T cs) {
     U32 st = MQD_CTX(d, cx);
     U32 qe = st & 0xFFFFu;
     U32 mps = st >> 31;
@@ -103,7 +103,7 @@ GAIL_FN U32 mqd_decode(INOUT(MqDec) d, U32 cx, MQD_IN_T in) {
     MQD_CTX(d, cx) = MQD_TAB(next) | (nmps << 31);
     I32 n = 15 - FIND_MSB(d.A);
     do {
-        if (d.CT == 0) mqd_bytein(d, in);
+        if (d.CT == 0) mqd_bytein(d, cs);
         I32 s = n < d.CT ? n : d.CT;
         d.A <<= TO_U32(s);
         d.C <<= TO_U32(s);

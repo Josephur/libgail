@@ -5,7 +5,7 @@
 // Each EncoderSlot owns a full set of device buffers and a command buffer that is
 // recorded once and resubmitted for every frame, so several frames can be in
 // flight per GPU (one per slot) while the CPU runs rate control / Tier-2.
-#include "vulkan/vk_loader.h"
+#include "vulkan/vk_device.h"
 
 #include <algorithm>
 #include <chrono>
@@ -36,13 +36,6 @@ namespace gail {
 
 namespace {
 
-#define VKCHECK(x)                                                                                   \
-    do {                                                                                             \
-        VkResult r_ = (x);                                                                           \
-        if (r_ != VK_SUCCESS) throw std::runtime_error(std::string("Vulkan error ") + std::to_string(r_) + " at " #x); \
-    } while (0)
-
-constexpr uint32_t kPushSize = 128;
 
 VkInstance g_instance = VK_NULL_HANDLE;
 std::mutex g_instanceMutex;
@@ -73,14 +66,6 @@ VkInstance instance() {
     unusable = false;
     return g_instance;
 }
-
-struct Buffer {
-    VkBuffer buf = VK_NULL_HANDLE;
-    VkDeviceMemory mem = VK_NULL_HANDLE;
-    VkDeviceSize size = 0;
-    VkDeviceAddress addr = 0;
-    void* map = nullptr;
-};
 
 // Push-constant blocks (must match the GLSL declarations).
 struct PcColor {
@@ -123,300 +108,7 @@ struct PcCompact {
 
 enum Pipe { P_COLOR, P_COLOR_YUV, P_ROWS, P_COLS, P_QUANT, P_T1CM, P_T1MQ, P_SCAN, P_COMPACT, P_ORDER, P_COUNT };
 
-class VulkanDevice : public Device {
-public:
-    VulkanDevice(VkPhysicalDevice phys, const Logger& log) : phys_(phys), log_(log) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(phys, &props);
-        name_ = props.deviceName;
-        timestampPeriod_ = props.limits.timestampPeriod;
-        vkGetPhysicalDeviceMemoryProperties(phys, &memProps_);
-
-        VkPhysicalDeviceSubgroupProperties sgp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
-        VkPhysicalDeviceSubgroupSizeControlProperties sscp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
-        sgp.pNext = &sscp;
-        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-        p2.pNext = &sgp;
-        vkGetPhysicalDeviceProperties2(phys, &p2);
-        const VkSubgroupFeatureFlags need = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
-                                            VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
-                                            VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT;
-        if ((sgp.supportedOperations & need) != need || !(sgp.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT))
-            throw std::runtime_error(name_ + ": missing subgroup operations");
-        if (sgp.subgroupSize != 32) {
-            if (sscp.minSubgroupSize <= 32 && sscp.maxSubgroupSize >= 32 &&
-                (sscp.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT))
-                forceSubgroup32_ = true;
-            else
-                throw std::runtime_error(name_ + ": Tier-1 kernel needs 32-wide subgroups");
-        }
-
-        uint32_t nq = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(phys, &nq, nullptr);
-        std::vector<VkQueueFamilyProperties> qf(nq);
-        vkGetPhysicalDeviceQueueFamilyProperties(phys, &nq, qf.data());
-        family_ = UINT32_MAX;
-        for (uint32_t i = 0; i < nq; ++i)  // prefer a dedicated compute queue
-            if ((qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
-                family_ = i;
-                break;
-            }
-        if (family_ == UINT32_MAX)
-            for (uint32_t i = 0; i < nq; ++i)
-                if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                    family_ = i;
-                    break;
-                }
-        if (family_ == UINT32_MAX) throw std::runtime_error("no compute queue");
-        if (!qf[family_].timestampValidBits) timestamps_ = false;
-        // A transfer-only family maps to the copy (DMA) engines: uploads there overlap with
-        // compute work of other frames in flight.
-        xferFamily_ = family_;
-        for (uint32_t i = 0; i < nq; ++i)
-            if ((qf[i].queueFlags & VK_QUEUE_TRANSFER_BIT) &&
-                !(qf[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT))) {
-                xferFamily_ = i;
-                break;
-            }
-
-        // Several queues per family: each frame slot submits to its own queue, so the
-        // stage barriers of one frame do not serialize against other frames and their
-        // kernels overlap on the GPU (hiding the serial MQ tail and small dispatches).
-        // Measured with 4 frames in flight (1 / 2 / 8 queues): RTX 5060 Ti 4K 75 / 97 / 95
-        // fps, 2K 132 / 205 / 232 fps; RTX 3090 2K 134 / 184 / 217 fps, but 4K 101 / 87 / 82
-        // fps (frames contend there; CUDA is the backend of choice on NVIDIA anyway).
-        // GAIL_VK_QUEUES overrides.
-        uint32_t wantQueues = 8;
-        if (const char* q = std::getenv("GAIL_VK_QUEUES")) wantQueues = (uint32_t)std::max(1, std::atoi(q));
-        numQueues_ = std::min<uint32_t>(qf[family_].queueCount, std::min<uint32_t>(wantQueues, 8));
-        numXfer_ = xferFamily_ == family_ ? numQueues_ : std::min<uint32_t>(qf[xferFamily_].queueCount, numQueues_);
-        std::vector<float> prio(8, 1.0f);
-        VkDeviceQueueCreateInfo qcis[2] = {{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO},
-                                           {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
-        qcis[0].queueFamilyIndex = family_;
-        qcis[0].queueCount = numQueues_;
-        qcis[0].pQueuePriorities = prio.data();
-        qcis[1].queueFamilyIndex = xferFamily_;
-        qcis[1].queueCount = numXfer_;
-        qcis[1].pQueuePriorities = prio.data();
-
-        VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
-        f13.synchronization2 = VK_TRUE;
-        f13.subgroupSizeControl = forceSubgroup32_;
-        f13.computeFullSubgroups = forceSubgroup32_;
-        VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-        f12.pNext = &f13;
-        f12.bufferDeviceAddress = VK_TRUE;
-        f12.storageBuffer8BitAccess = VK_TRUE;
-        f12.shaderInt8 = VK_TRUE;
-        f12.timelineSemaphore = VK_TRUE;
-        VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
-        f11.pNext = &f12;
-        f11.storageBuffer16BitAccess = VK_TRUE;
-        VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-        f2.pNext = &f11;
-        f2.features.shaderInt64 = VK_TRUE;
-        f2.features.shaderInt16 = VK_TRUE;
-
-        // VK_EXT_memory_budget tells how much device memory this process may still take
-        // (other processes included); the pipeline sizes the frames in flight from it.
-        uint32_t ne = 0;
-        vkEnumerateDeviceExtensionProperties(phys, nullptr, &ne, nullptr);
-        std::vector<VkExtensionProperties> exts(ne);
-        vkEnumerateDeviceExtensionProperties(phys, nullptr, &ne, exts.data());
-        const char* devExts[1] = {VK_EXT_MEMORY_BUDGET_EXTENSION_NAME};
-        budgetExt_ = std::any_of(exts.begin(), exts.end(), [](const VkExtensionProperties& e) {
-            return std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0;
-        });
-
-        VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-        dci.pNext = &f2;
-        dci.queueCreateInfoCount = xferFamily_ != family_ ? 2 : 1;
-        dci.pQueueCreateInfos = qcis;
-        dci.enabledExtensionCount = budgetExt_ ? 1 : 0;
-        dci.ppEnabledExtensionNames = devExts;
-        VKCHECK(vkCreateDevice(phys, &dci, nullptr, &dev_));
-        for (uint32_t i = 0; i < numQueues_; ++i) {
-            queues_.push_back({});
-            vkGetDeviceQueue(dev_, family_, i, &queues_.back().q);
-        }
-        for (uint32_t i = 0; i < numXfer_; ++i) {
-            xferQueues_.push_back({});
-            vkGetDeviceQueue(dev_, xferFamily_, i, &xferQueues_.back().q);
-        }
-
-        VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, kPushSize};
-        VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        plci.pushConstantRangeCount = 1;
-        plci.pPushConstantRanges = &pcr;
-        VKCHECK(vkCreatePipelineLayout(dev_, &plci, nullptr, &layout_));
-        pipes_[P_COLOR] = makePipe(color_spv, sizeof color_spv, false);
-        pipes_[P_COLOR_YUV] = makePipe(color_yuv_spv, sizeof color_yuv_spv, false);
-        pipes_[P_ROWS] = makePipe(dwt_rows_spv, sizeof dwt_rows_spv, false);
-        pipes_[P_COLS] = makePipe(dwt_cols_spv, sizeof dwt_cols_spv, false);
-        pipes_[P_QUANT] = makePipe(quantize_spv, sizeof quantize_spv, false);
-        pipes_[P_T1CM] = makePipe(t1_cm_spv, sizeof t1_cm_spv, true);
-        pipes_[P_T1MQ] = makePipe(t1_mq_spv, sizeof t1_mq_spv, false);
-        pipes_[P_SCAN] = makePipe(scan_spv, sizeof scan_spv, false);
-        pipes_[P_COMPACT] = makePipe(compact_spv, sizeof compact_spv, false);
-        pipes_[P_ORDER] = makePipe(order_spv, sizeof order_spv, false);
-        if (log_) {
-            char buf[512];
-            std::snprintf(buf, sizeof buf, "vulkan: %s (%u compute queues, %u transfer queues, subgroup %u%s)",
-                          name_.c_str(), numQueues_, numXfer_, sgp.subgroupSize, forceSubgroup32_ ? " -> 32" : "");
-            log_(LogLevel::Info, buf);
-        }
-    }
-
-    ~VulkanDevice() override {
-        if (!dev_) return;
-        vkDeviceWaitIdle(dev_);
-        for (auto p : pipes_)
-            if (p) vkDestroyPipeline(dev_, p, nullptr);
-        vkDestroyPipelineLayout(dev_, layout_, nullptr);
-        vkDestroyDevice(dev_, nullptr);
-    }
-
-    std::string name() const override { return name_ + " (Vulkan)"; }
-    const Logger& log() const { return log_; }
-    std::unique_ptr<EncoderSlot> createSlot(const FrameLayout& L, const EncodeSettings& s) override;
-    uint64_t slotBytes(const FrameLayout& L, const EncodeSettings& s) const override;
-    // The largest device-local heap: its size, and (with VK_EXT_memory_budget) how much of
-    // the driver's budget for this process is still unused.
-    DeviceMemory memory() const override {
-        VkPhysicalDeviceMemoryBudgetPropertiesEXT bud{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
-        VkPhysicalDeviceMemoryProperties2 mp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
-        if (budgetExt_) mp.pNext = &bud;
-        vkGetPhysicalDeviceMemoryProperties2(phys_, &mp);
-        DeviceMemory m;
-        uint32_t heap = UINT32_MAX;
-        for (uint32_t h = 0; h < mp.memoryProperties.memoryHeapCount; ++h) {
-            const VkMemoryHeap& mh = mp.memoryProperties.memoryHeaps[h];
-            if ((mh.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mh.size > m.total) {
-                m.total = mh.size;
-                heap = h;
-            }
-        }
-        if (budgetExt_ && heap != UINT32_MAX) {
-            m.budgeted = true;
-            m.available = bud.heapBudget[heap] > bud.heapUsage[heap] ? bud.heapBudget[heap] - bud.heapUsage[heap] : 0;
-        }
-        return m;
-    }
-
-    VkDevice dev_ = VK_NULL_HANDLE;
-    VkPhysicalDevice phys_;
-    struct Queue {
-        VkQueue q = VK_NULL_HANDLE;
-        std::mutex m;
-        Queue() = default;
-        Queue(Queue&& o) noexcept : q(o.q) {}
-    };
-    std::deque<Queue> queues_, xferQueues_;
-    uint32_t family_ = 0, xferFamily_ = 0, numQueues_ = 1, numXfer_ = 1;
-    std::atomic<uint32_t> nextQueue_{0};
-    VkPipelineLayout layout_ = VK_NULL_HANDLE;
-    VkPipeline pipes_[P_COUNT] = {};
-    float timestampPeriod_ = 1;
-    bool timestamps_ = true;
-    bool budgetExt_ = false;
-    VkPhysicalDeviceMemoryProperties memProps_;
-
-    Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags want,
-                        VkMemoryPropertyFlags fallback = 0) {
-        Buffer b;
-        b.size = size;
-        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size = size;
-        const uint32_t fams[2] = {family_, xferFamily_};
-        if (xferFamily_ != family_) {
-            bci.sharingMode = VK_SHARING_MODE_CONCURRENT;
-            bci.queueFamilyIndexCount = 2;
-            bci.pQueueFamilyIndices = fams;
-        }
-        bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-        // Running out of memory is a soft failure: the pipeline runs with fewer frames in
-        // flight. Nothing of this buffer is left behind.
-        auto outOfMemory = [&](VkResult r, const char* kind) {
-            if (r != VK_ERROR_OUT_OF_DEVICE_MEMORY && r != VK_ERROR_OUT_OF_HOST_MEMORY) return false;
-            if (b.buf) vkDestroyBuffer(dev_, b.buf, nullptr);
-            throw DeviceOutOfMemory(std::string("cannot allocate ") + std::to_string(size >> 20) + " MiB of " + kind);
-        };
-        VkResult r = vkCreateBuffer(dev_, &bci, nullptr, &b.buf);
-        outOfMemory(r, "host memory");
-        VKCHECK(r);
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(dev_, b.buf, &req);
-        uint32_t type = findType(req.memoryTypeBits, want);
-        if (type == UINT32_MAX && fallback) type = findType(req.memoryTypeBits, fallback);
-        if (type == UINT32_MAX) throw std::runtime_error("no suitable memory type");
-        VkMemoryAllocateFlagsInfo fi{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
-        fi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        mai.pNext = &fi;
-        mai.allocationSize = req.size;
-        mai.memoryTypeIndex = type;
-        r = vkAllocateMemory(dev_, &mai, nullptr, &b.mem);
-        outOfMemory(r, (memProps_.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-                           ? "device memory"
-                           : "host-visible memory");
-        VKCHECK(r);
-        VKCHECK(vkBindBufferMemory(dev_, b.buf, b.mem, 0));
-        VkBufferDeviceAddressInfo ai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-        ai.buffer = b.buf;
-        b.addr = vkGetBufferDeviceAddress(dev_, &ai);
-        if (memProps_.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-            VKCHECK(vkMapMemory(dev_, b.mem, 0, VK_WHOLE_SIZE, 0, &b.map));
-        return b;
-    }
-    void destroy(Buffer& b) {
-        if (b.map) vkUnmapMemory(dev_, b.mem);
-        if (b.buf) vkDestroyBuffer(dev_, b.buf, nullptr);
-        if (b.mem) vkFreeMemory(dev_, b.mem, nullptr);
-        b = Buffer{};
-    }
-
-private:
-    uint32_t findType(uint32_t bits, VkMemoryPropertyFlags want) {
-        for (uint32_t i = 0; i < memProps_.memoryTypeCount; ++i)
-            if ((bits & (1u << i)) && (memProps_.memoryTypes[i].propertyFlags & want) == want) return i;
-        return UINT32_MAX;
-    }
-    VkPipeline makePipe(const uint32_t* code, size_t size, bool needSubgroup32) {
-        VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        smci.codeSize = size;
-        smci.pCode = code;
-        VkShaderModule mod;
-        VKCHECK(vkCreateShaderModule(dev_, &smci, nullptr, &mod));
-        VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rss{
-            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
-        rss.requiredSubgroupSize = 32;
-        VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        cpci.stage.module = mod;
-        cpci.stage.pName = "main";
-        if (needSubgroup32 && forceSubgroup32_) {
-            cpci.stage.pNext = &rss;
-            cpci.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
-        }
-        cpci.layout = layout_;
-        VkPipeline p;
-        VKCHECK(vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cpci, nullptr, &p));
-        vkDestroyShaderModule(dev_, mod, nullptr);
-        return p;
-    }
-
-    std::string name_;
-    bool forceSubgroup32_ = false;
-    Logger log_;
-};
-
-constexpr VkMemoryPropertyFlags kDevLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-constexpr VkMemoryPropertyFlags kHostCoherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-constexpr VkMemoryPropertyFlags kHostCached =
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+static_assert(P_COUNT <= VulkanDevice::kMaxPipes, "more encoder pipelines than the device has room for");
 
 enum Stamp { TS_START, TS_UPLOAD, TS_COLOR, TS_DWT, TS_QUANT, TS_T1CM, TS_T1MQ, TS_END, TS_COUNT };
 
@@ -947,6 +639,151 @@ private:
     bool useEvents_ = std::getenv("GAIL_VK_EVENTS") != nullptr;
 };
 
+}  // namespace
+
+VulkanDevice::VulkanDevice(VkPhysicalDevice phys, const Logger& log) : phys_(phys), log_(log) {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(phys, &props);
+    name_ = props.deviceName;
+    timestampPeriod_ = props.limits.timestampPeriod;
+    vkGetPhysicalDeviceMemoryProperties(phys, &memProps_);
+
+    VkPhysicalDeviceSubgroupProperties sgp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceSubgroupSizeControlProperties sscp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
+    sgp.pNext = &sscp;
+    VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    p2.pNext = &sgp;
+    vkGetPhysicalDeviceProperties2(phys, &p2);
+    const VkSubgroupFeatureFlags need = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+                                        VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
+                                        VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT;
+    if ((sgp.supportedOperations & need) != need || !(sgp.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT))
+        throw std::runtime_error(name_ + ": missing subgroup operations");
+    if (sgp.subgroupSize != 32) {
+        if (sscp.minSubgroupSize <= 32 && sscp.maxSubgroupSize >= 32 &&
+            (sscp.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT))
+            forceSubgroup32_ = true;
+        else
+            throw std::runtime_error(name_ + ": Tier-1 kernel needs 32-wide subgroups");
+    }
+
+    uint32_t nq = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &nq, nullptr);
+    std::vector<VkQueueFamilyProperties> qf(nq);
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &nq, qf.data());
+    family_ = UINT32_MAX;
+    for (uint32_t i = 0; i < nq; ++i)  // prefer a dedicated compute queue
+        if ((qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+            family_ = i;
+            break;
+        }
+    if (family_ == UINT32_MAX)
+        for (uint32_t i = 0; i < nq; ++i)
+            if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                family_ = i;
+                break;
+            }
+    if (family_ == UINT32_MAX) throw std::runtime_error("no compute queue");
+    if (!qf[family_].timestampValidBits) timestamps_ = false;
+    // A transfer-only family maps to the copy (DMA) engines: uploads there overlap with
+    // compute work of other frames in flight.
+    xferFamily_ = family_;
+    for (uint32_t i = 0; i < nq; ++i)
+        if ((qf[i].queueFlags & VK_QUEUE_TRANSFER_BIT) &&
+            !(qf[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT))) {
+            xferFamily_ = i;
+            break;
+        }
+
+    // Several queues per family: each frame slot submits to its own queue, so the
+    // stage barriers of one frame do not serialize against other frames and their
+    // kernels overlap on the GPU (hiding the serial MQ tail and small dispatches).
+    // Measured with 4 frames in flight (1 / 2 / 8 queues): RTX 5060 Ti 4K 75 / 97 / 95
+    // fps, 2K 132 / 205 / 232 fps; RTX 3090 2K 134 / 184 / 217 fps, but 4K 101 / 87 / 82
+    // fps (frames contend there; CUDA is the backend of choice on NVIDIA anyway).
+    // GAIL_VK_QUEUES overrides.
+    uint32_t wantQueues = 8;
+    if (const char* q = std::getenv("GAIL_VK_QUEUES")) wantQueues = (uint32_t)std::max(1, std::atoi(q));
+    numQueues_ = std::min<uint32_t>(qf[family_].queueCount, std::min<uint32_t>(wantQueues, 8));
+    numXfer_ = xferFamily_ == family_ ? numQueues_ : std::min<uint32_t>(qf[xferFamily_].queueCount, numQueues_);
+    std::vector<float> prio(8, 1.0f);
+    VkDeviceQueueCreateInfo qcis[2] = {{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO},
+                                       {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
+    qcis[0].queueFamilyIndex = family_;
+    qcis[0].queueCount = numQueues_;
+    qcis[0].pQueuePriorities = prio.data();
+    qcis[1].queueFamilyIndex = xferFamily_;
+    qcis[1].queueCount = numXfer_;
+    qcis[1].pQueuePriorities = prio.data();
+
+    VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    f13.synchronization2 = VK_TRUE;
+    f13.subgroupSizeControl = forceSubgroup32_;
+    f13.computeFullSubgroups = forceSubgroup32_;
+    VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    f12.pNext = &f13;
+    f12.bufferDeviceAddress = VK_TRUE;
+    f12.storageBuffer8BitAccess = VK_TRUE;
+    f12.shaderInt8 = VK_TRUE;
+    f12.timelineSemaphore = VK_TRUE;
+    VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    f11.pNext = &f12;
+    f11.storageBuffer16BitAccess = VK_TRUE;
+    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    f2.pNext = &f11;
+    f2.features.shaderInt64 = VK_TRUE;
+    f2.features.shaderInt16 = VK_TRUE;
+
+    // VK_EXT_memory_budget tells how much device memory this process may still take
+    // (other processes included); the pipeline sizes the frames in flight from it.
+    uint32_t ne = 0;
+    vkEnumerateDeviceExtensionProperties(phys, nullptr, &ne, nullptr);
+    std::vector<VkExtensionProperties> exts(ne);
+    vkEnumerateDeviceExtensionProperties(phys, nullptr, &ne, exts.data());
+    const char* devExts[1] = {VK_EXT_MEMORY_BUDGET_EXTENSION_NAME};
+    budgetExt_ = std::any_of(exts.begin(), exts.end(), [](const VkExtensionProperties& e) {
+        return std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0;
+    });
+
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.pNext = &f2;
+    dci.queueCreateInfoCount = xferFamily_ != family_ ? 2 : 1;
+    dci.pQueueCreateInfos = qcis;
+    dci.enabledExtensionCount = budgetExt_ ? 1 : 0;
+    dci.ppEnabledExtensionNames = devExts;
+    VKCHECK(vkCreateDevice(phys, &dci, nullptr, &dev_));
+    for (uint32_t i = 0; i < numQueues_; ++i) {
+        queues_.push_back({});
+        vkGetDeviceQueue(dev_, family_, i, &queues_.back().q);
+    }
+    for (uint32_t i = 0; i < numXfer_; ++i) {
+        xferQueues_.push_back({});
+        vkGetDeviceQueue(dev_, xferFamily_, i, &xferQueues_.back().q);
+    }
+
+    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, kPushSize};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pcr;
+    VKCHECK(vkCreatePipelineLayout(dev_, &plci, nullptr, &layout_));
+    pipes_[P_COLOR] = makePipe(color_spv, sizeof color_spv, false);
+    pipes_[P_COLOR_YUV] = makePipe(color_yuv_spv, sizeof color_yuv_spv, false);
+    pipes_[P_ROWS] = makePipe(dwt_rows_spv, sizeof dwt_rows_spv, false);
+    pipes_[P_COLS] = makePipe(dwt_cols_spv, sizeof dwt_cols_spv, false);
+    pipes_[P_QUANT] = makePipe(quantize_spv, sizeof quantize_spv, false);
+    pipes_[P_T1CM] = makePipe(t1_cm_spv, sizeof t1_cm_spv, true);
+    pipes_[P_T1MQ] = makePipe(t1_mq_spv, sizeof t1_mq_spv, false);
+    pipes_[P_SCAN] = makePipe(scan_spv, sizeof scan_spv, false);
+    pipes_[P_COMPACT] = makePipe(compact_spv, sizeof compact_spv, false);
+    pipes_[P_ORDER] = makePipe(order_spv, sizeof order_spv, false);
+    if (log_) {
+        char buf[512];
+        std::snprintf(buf, sizeof buf, "vulkan: %s (%u compute queues, %u transfer queues, subgroup %u%s)",
+                      name_.c_str(), numQueues_, numXfer_, sgp.subgroupSize, forceSubgroup32_ ? " -> 32" : "");
+        log_(LogLevel::Info, buf);
+    }
+}
+
 std::unique_ptr<EncoderSlot> VulkanDevice::createSlot(const FrameLayout& L, const EncodeSettings& s) {
     return std::make_unique<VulkanSlot>(*this, L, s);
 }
@@ -954,8 +791,6 @@ std::unique_ptr<EncoderSlot> VulkanDevice::createSlot(const FrameLayout& L, cons
 uint64_t VulkanDevice::slotBytes(const FrameLayout& L, const EncodeSettings& s) const {
     return slotSizes(L, s).deviceBytes();
 }
-
-}  // namespace
 
 namespace {
 

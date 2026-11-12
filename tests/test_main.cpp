@@ -2062,6 +2062,8 @@ int main(int argc, char** argv) {
     run("matrix", testSourceMatrix);
     run("sources", testSourceErrors);
 #ifdef GAIL_HAVE_VULKAN
+    run("gpudec2k", [] { testGpuDecode(Profile::Cinema2K, false); });
+    run("gpudec4k", [] { testGpuDecode(Profile::Cinema4K, false); });
     run("gpumem", [] { testGpuMemory(false); });
     run("gpucolor", [] { testGpuColor(false); });
     run("gpu2k", [] { testGpu(Profile::Cinema2K, false); });

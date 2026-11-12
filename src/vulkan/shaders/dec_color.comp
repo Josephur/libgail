@@ -1,0 +1,33 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Decoder output: inverse ICT (ISO/IEC 15444-1 G.3), level shift, rounding and clamping to
+// 12 bits; three 16-bit words per pixel, with the codes in the low bits or shifted up.
+#include "common.glsl"
+#define GAIL_GLSL 1
+#include "kernels/ict.h"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint64_t planes;   // F32Buf: three reconstructed planes
+    uint64_t dst;      // U16Buf: w * h * 3 words
+    uint stride;       // plane width
+    uint planeSize;
+    uint w, h;         // picture size
+    uint shift;        // 0 or 4
+};
+
+void main() {
+    uint x = gl_GlobalInvocationID.x, y = gl_WorkGroupID.y;
+    if (x >= w || y >= h) return;
+    F32Buf P = F32Buf(planes);
+    U16Buf O = U16Buf(dst);
+    uint i = y * stride + x;
+    float y0 = P.v[i], y1 = P.v[planeSize + i], y2 = P.v[2u * planeSize + i];
+    vec3 v = vec3(y0 + float(ICT_R_Y2) * y2, y0 + float(ICT_G_Y1) * y1 + float(ICT_G_Y2) * y2, y0 + float(ICT_B_Y1) * y1);
+    ivec3 code = clamp(ivec3(floor(v + 2048.5)), ivec3(0), ivec3(4095));
+    uint o = (y * w + x) * 3u;
+    O.v[o] = uint16_t(uint(code.x) << shift);
+    O.v[o + 1u] = uint16_t(uint(code.y) << shift);
+    O.v[o + 2u] = uint16_t(uint(code.z) << shift);
+}

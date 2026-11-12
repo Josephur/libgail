@@ -153,6 +153,9 @@ bool backendDecodes(const std::string& backend) {
 #ifdef GAIL_HAVE_CUDA
     if (backend == "cuda") return true;
 #endif
+#ifdef GAIL_HAVE_VULKAN
+    if (backend == "vulkan") return true;
+#endif
     return backend == "cpu";
 }
 
