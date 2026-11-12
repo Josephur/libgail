@@ -25,6 +25,7 @@
 #include "core/rate_control.h"
 #include "core/t1_ref.h"
 #include "core/t2.h"
+#include "core/thread_pool.h"
 
 #define MQ_OUT_T uint8_t*
 #define MQ_PUT(o, i, v) ((o)[(i)] = (uint8_t)(v))
@@ -1239,6 +1240,52 @@ static void testRateLimits() {
           frames);
 }
 
+// The shared thread pool: every index handed out once, concurrent run() calls take turns,
+// and a job's exception reaches the caller without wedging the pool.
+static void testThreadPool() {
+    ThreadPool pool(4, false);
+    CHECK(pool.threads() == 4, "pool has %d threads", pool.threads());
+    const int n = 10000;
+    std::atomic<long long> sum{0};
+    std::vector<std::atomic<int>> hits(n);
+    pool.run(n, [&](int i) {
+        sum += i;
+        ++hits[i];
+    });
+    CHECK(sum.load() == 49995000LL, "sum %lld", sum.load());
+    int wrong = 0;
+    for (auto& h : hits) wrong += h.load() != 1;
+    CHECK(wrong == 0, "%d indices not run exactly once", wrong);
+
+    int calls = 0;
+    pool.run(0, [&](int) { ++calls; });
+    CHECK(calls == 0, "run(0) called the job");
+
+    bool thrown = false;
+    try {
+        pool.run(100, [&](int i) {
+            if (i == 7) throw std::runtime_error("seven");
+        });
+    } catch (const std::runtime_error& e) {
+        thrown = std::string(e.what()) == "seven";
+    }
+    CHECK(thrown, "exception from a job did not reach the caller");
+    sum = 0;
+    pool.run(n, [&](int i) { sum += i; });
+    CHECK(sum.load() == 49995000LL, "pool unusable after an exception: sum %lld", sum.load());
+
+    std::atomic<long long> a{0}, b{0};
+    std::thread other([&] { pool.run(n, [&](int i) { a += i; }); });
+    pool.run(n, [&](int i) { b += i; });
+    other.join();
+    CHECK(a.load() == 49995000LL && b.load() == 49995000LL, "concurrent runs: %lld, %lld", a.load(), b.load());
+
+    ThreadPool one(1, false);
+    sum = 0;
+    one.run(100, [&](int i) { sum += i; });
+    CHECK(sum.load() == 4950, "single-thread pool: sum %lld", sum.load());
+}
+
 int main(int argc, char** argv) {
     std::string only = argc > 1 ? argv[1] : "";
     auto run = [&](const char* name, const std::function<void()>& fn) {
@@ -1246,6 +1293,7 @@ int main(int argc, char** argv) {
         std::printf("[%s]\n", name);
         fn();
     };
+    run("pool", testThreadPool);
     run("dwt", testDwtRoundTrip);
     run("norms", testNorms);
     run("t1", testT1Truncation);
