@@ -6,7 +6,8 @@
 #   windows-msvc   MSVC, CUDA + Vulkan + CPU backends, tests
 #   windows-mingw  MinGW-w64 cross-build from Linux (Vulkan + CPU), tests under Wine
 #   macos          Apple clang, CPU backend only, tests, install + pkg-config consumer
-#   ffmpeg         FFmpeg built with the libgail encoder, encoding a test pattern
+#   ffmpeg         FFmpeg built with the libgail encoder and decoder: a test pattern encoded,
+#                  then decoded again and compared with FFmpeg's own JPEG 2000 decoder
 #   release-tag    on v* tags only: the tag must match the version in gail.h
 #   release        on v* tags only, after everything else passes: packages the four builds as archives
 #                  with SHA256SUMS and attaches them to a DRAFT GitHub release for review
@@ -272,14 +273,15 @@ jobs:
           cmake --build build
           cmake --install build
 
-      - name: Build FFmpeg with the libgail encoder
+      - name: Build FFmpeg with the libgail encoder and decoder
         run: |
           git clone --depth 1 --branch "$FFMPEG_VERSION" https://github.com/FFmpeg/FFmpeg.git "$RUNNER_TEMP/ffmpeg"
           integrations/ffmpeg/add-to-ffmpeg.sh "$RUNNER_TEMP/ffmpeg"
           cd "$RUNNER_TEMP/ffmpeg"
           PKG_CONFIG_PATH="$RUNNER_TEMP/gail/lib/pkgconfig" ./configure --disable-doc --disable-x86asm \
-            --disable-everything --enable-libgail --enable-encoder=libgail --enable-indev=lavfi --enable-decoder=wrapped_avframe \
-            --enable-filter=testsrc2,format,scale,pad,null --enable-muxer=image2 --enable-protocol=file \
+            --disable-everything --enable-libgail --enable-encoder=libgail,rawvideo --enable-indev=lavfi \
+            --enable-decoder=libgail,jpeg2000,wrapped_avframe --enable-parser=jpeg2000 --enable-demuxer=image2 \
+            --enable-filter=testsrc2,format,scale,pad,null --enable-muxer=image2,rawvideo --enable-protocol=file \
             --extra-ldflags="-Wl,-rpath,$RUNNER_TEMP/gail/lib"
           make -j"$(nproc)" ffmpeg
 
@@ -291,6 +293,31 @@ jobs:
           "$ff" -hide_banner -f lavfi -i testsrc2=size=1920x1080:rate=24 -frames:v 4 \
             -pix_fmt yuv420p10le -c:v libgail -f image2 j2c/%03d.j2c
           ./build/gail-check j2c/*.j2c
+
+      - name: Decode it again
+        run: |
+          ff="$RUNNER_TEMP/ffmpeg/ffmpeg"
+          "$ff" -hide_banner -h decoder=libgail
+          # the same four frames through libgail and through FFmpeg's own decoder: 12-bit
+          # X'Y'Z' pictures that may differ by one code value, and at half size
+          "$ff" -hide_banner -c:v libgail -i j2c/%03d.j2c -f rawvideo gail.xyz
+          "$ff" -hide_banner -c:v jpeg2000 -i j2c/%03d.j2c -f rawvideo native.xyz
+          "$ff" -hide_banner -lowres 1 -c:v libgail -i j2c/%03d.j2c -f rawvideo half.xyz
+          python3 - <<'PY'
+          import os, sys
+          a = open('gail.xyz', 'rb').read()
+          b = open('native.xyz', 'rb').read()
+          want = 4 * 1998 * 1080 * 6
+          assert len(a) == want and len(b) == want, (len(a), len(b), want)
+          assert os.path.getsize('half.xyz') == 4 * 999 * 540 * 6, os.path.getsize('half.xyz')
+          worst = 0
+          for i in range(0, want, 2):
+              d = abs((a[i] | a[i + 1] << 8) - (b[i] | b[i + 1] << 8)) >> 4
+              if d > worst:
+                  worst = d
+          print('largest difference from the jpeg2000 decoder:', worst, 'code value(s)')
+          sys.exit(0 if worst <= 1 else 1)
+          PY
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

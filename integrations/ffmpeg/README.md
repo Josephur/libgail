@@ -1,13 +1,15 @@
-# FFmpeg encoder: `libgail` (GAIL)
+# FFmpeg encoder and decoder: `libgail` (GAIL)
 
-[libgailenc.c](libgailenc.c) adds a JPEG 2000 encoder named `libgail` to FFmpeg. Every
-packet is a DCI-compliant codestream encoded on the GPU. It is tested with FFmpeg 9.0.2.
+[libgailenc.c](libgailenc.c) adds a JPEG 2000 encoder named `libgail` to FFmpeg, and
+[libgaildec.c](libgaildec.c) a decoder of the same name. The encoder's every packet is a
+DCI-compliant codestream encoded on the GPU; the decoder turns DCI codestreams back into
+`xyz12le` pictures on the GPU. Both are tested with FFmpeg 9.0.2.
 
 ## Building FFmpeg with it
 
 1. Build and install GAIL ([docs/LIBRARY.md](../../docs/LIBRARY.md)) so that
    `pkg-config gail` works.
-2. Add the encoder to FFmpeg and configure it with the encoder enabled:
+2. Add the encoder and decoder to FFmpeg and configure it with them enabled:
 
 ```bash
 integrations/ffmpeg/add-to-ffmpeg.sh /path/to/ffmpeg
@@ -16,12 +18,13 @@ cd /path/to/ffmpeg
 make -j
 ```
 
-`add-to-ffmpeg.sh` copies the source file in and adds `--enable-libgail` to `configure`,
-plus one line each to the codec list and the Makefile. Running it twice changes nothing.
+`add-to-ffmpeg.sh` copies the two source files in and adds `--enable-libgail` to
+`configure`, plus a line for each to the codec list and the Makefile. Running it twice
+changes nothing, and a tree patched for the encoder alone gains the decoder.
 For Windows, cross-compile FFmpeg with MinGW-w64 as usual and point `PKG_CONFIG_PATH`
 at a Windows build of GAIL.
 
-## Use
+## Encoding
 
 Encode HDR10 UHD to 4K DCI JPEG 2000 frames at 24 fps:
 
@@ -74,9 +77,54 @@ and the mastering peak from HDR metadata).
 | `-gamut` | `none`, `p3d65`, `dcip3` | none | soft gamut compression |
 | `-dci_check` | 0 / 1 | 1 | verify every codestream |
 
+## Decoding
+
+FFmpeg keeps its own `jpeg2000` decoder as the default for JPEG 2000, so `libgail` is
+chosen by name, before the input it applies to:
+
+```bash
+ffmpeg -c:v libgail -i picture.mxf -f null -              # decode a DCP picture track
+ffmpeg -c:v libgail -i picture.mxf -pix_fmt rgb48le out_%06d.tiff
+ffmpeg -lowres 1 -c:v libgail -i picture.mxf ...          # at half size; 2 = a quarter
+```
+
+A player that decodes through this FFmpeg's libavcodec selects it the same way: mpv with
+`--vd=libgail`, VLC with `--avcodec-codec=libgail`. Neither player has been tested with it
+yet.
+
+* **What it decodes:** DCI streams, 2K and 4K: 12-bit X'Y'Z', 9/7 wavelet, one tile, as
+  DCP picture track files hold them. Other JPEG 2000 (lossless, other bit depths, HTJ2K) is
+  refused with a message naming the reason; the `jpeg2000` decoder handles those.
+* **Output:** `xyz12le`, the format the `jpeg2000` decoder gives for the same streams, so
+  whatever follows (color conversion, scaling, display) works as it did. The pictures of
+  the two decoders differ by at most one code value.
+* **Delay:** several frames are in flight on the GPUs at once, so a frame comes out a few
+  packets after it went in, as with any decoder that has delay. Seeking works as usual.
+* **Encrypted DCPs:** decryption happens where the track file is read, before the
+  decoder, and is unchanged by the choice of decoder.
+* **A damaged frame** is reported and skipped; decoding carries on with the next.
+
+| Option | Values | Default | |
+|---|---|---|---|
+| `-lowres` | 0 to 5 | 0 | resolution levels to leave out: 1 = half size, 2 = a quarter |
+| `-backend` | `auto`, `cuda`, `vulkan`, `cpu` | auto | |
+| `-gpus` | `list`, indices (`0,1`), UUIDs as `nvidia-smi -L` prints them, or PCI bus IDs | all | `-gpus list` prints the devices |
+| `-inflight` | frames per GPU | 3 | |
+
 ## Tested
 
-FFmpeg 9.0.2 on Linux, source `test-media/real_4k_hdr_30s.mkv` (HDR10):
+FFmpeg 9.0.2 on Linux. Decoding, on 2K and 4K DCPs made by GAIL and by DCP-o-matic:
+
+| Run | Result |
+|---|---|
+| whole track, against the `jpeg2000` decoder | every picture within one code value; the same timestamps |
+| after a seek (`-ss`) | the same |
+| `-lowres 1`, `-lowres 2` | half and quarter size, within one code value of `jpeg2000 -lowres` |
+| a track file cut short | the incomplete frame is reported, the rest decode |
+
+Throughput is in [docs/BENCHMARKS.md](../../docs/BENCHMARKS.md).
+
+Encoding, source `test-media/real_4k_hdr_30s.mkv` (HDR10):
 
 | Run | Frames | Result |
 |---|---|---|
