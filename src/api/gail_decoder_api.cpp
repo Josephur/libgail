@@ -38,8 +38,67 @@ using namespace gail::api;
 // that size when fields are added.
 constexpr size_t kDecoderConfigSizeV1 = sizeof(gail_decoder_config);
 
-// In gail_image.reserved[3] of an image whose buffer the library allocated.
+// In gail_image.reserved[3] of an image whose buffer the library allocated; reserved[2]
+// then points at the pool the buffer goes back to.
 constexpr uint64_t kOwnedImage = 0x6761696C6F776E64ull;
+
+// The decoder's picture buffers. A 4K picture is 52 MB: taking that from the system for
+// every frame, and handing it back, costs more than decoding the frame, so released
+// buffers are kept and handed out again. Images may outlive the decoder: the pool is
+// freed when the decoder and the last image are gone.
+struct ImagePool {
+    std::mutex m;
+    std::vector<void*> spare;
+    size_t bytes = 0;      // size of every buffer
+    size_t keep = 0;       // how many spare ones to hold on to
+    long users = 1;        // the decoder, plus one per image handed out
+    bool closed = false;   // the decoder is gone: nothing is kept any more
+
+    void* take() {
+        std::unique_lock<std::mutex> l(m);
+        ++users;
+        if (!spare.empty()) {
+            void* p = spare.back();
+            spare.pop_back();
+            return p;
+        }
+        l.unlock();
+        void* p = std::malloc(bytes);
+        if (!p) release();
+        return p;
+    }
+    void give(void* p) {
+        {
+            std::lock_guard<std::mutex> l(m);
+            if (!closed && spare.size() < keep) {
+                spare.push_back(p);
+                p = nullptr;
+            }
+        }
+        std::free(p);
+        release();
+    }
+    void close() {
+        std::vector<void*> drop;
+        {
+            std::lock_guard<std::mutex> l(m);
+            closed = true;
+            drop.swap(spare);
+        }
+        for (void* p : drop) std::free(p);
+        release();
+    }
+
+private:
+    void release() {
+        bool last;
+        {
+            std::lock_guard<std::mutex> l(m);
+            last = --users == 0;
+        }
+        if (last) delete this;
+    }
+};
 
 struct Job {
     std::vector<uint8_t> cs;
@@ -49,7 +108,8 @@ struct Job {
     void* opaque = nullptr;
     uint8_t* dst = nullptr;
     ptrdiff_t stride = 0;
-    bool ownedDst = false;  // dst is the library's (malloc)
+    bool ownedDst = false;  // dst is the library's, from `pool`
+    ImagePool* pool = nullptr;
     // result
     bool done = false;
     int status = GAIL_OK;
@@ -57,13 +117,13 @@ struct Job {
     int device = 0;
 
     ~Job() {
-        if (ownedDst) std::free(dst);
+        if (ownedDst) pool->give(dst);
     }
     void failWith(int s, const std::string& why) {
         status = s;
         error = why;
         if (ownedDst) {
-            std::free(dst);
+            pool->give(dst);
             dst = nullptr;
             ownedDst = false;
         }
@@ -85,6 +145,7 @@ struct gail_decoder {
     std::shared_ptr<const FrameLayout> layout;
     DecodeSettings ds;
     int outW = 0, outH = 0;
+    ImagePool* pool = nullptr;
     struct Worker {
         std::thread thread;
         std::unique_ptr<DecoderSlot> slot;
@@ -175,6 +236,9 @@ struct gail_decoder {
             setError(why);
             return fail(GAIL_ERROR_NOMEM, why);
         }
+        pool = new ImagePool;
+        pool->bytes = (size_t)outW * 6 * (size_t)outH;
+        pool->keep = workers.size() * 2 + 2;
         for (auto& w : workers) w->thread = std::thread([this, wp = w.get()] { run(*wp); });
         log(GAIL_LOG_INFO, "gail %s: decoding %dx%d%s on %s, %zu frames in flight", gail_version_string(), layout->width,
             layout->height, ds.reduce ? (" at 1/" + std::to_string(1 << ds.reduce) + " size").c_str() : "", devicesDesc.c_str(),
@@ -245,7 +309,10 @@ struct gail_decoder {
         img.opaque = job.opaque;
         img.device = job.device;
         img.status = job.status;
-        if (job.ownedDst) img.reserved[3] = kOwnedImage;
+        if (job.ownedDst) {
+            img.reserved[2] = (uint64_t)(uintptr_t)job.pool;
+            img.reserved[3] = kOwnedImage;
+        }
     }
 
     // A worker is done with a job (or it never needed one): hand it to its waiter, or put
@@ -277,7 +344,7 @@ struct gail_decoder {
             ++nextOut;
             gail_image img;
             fill(img, *job);
-            img.reserved[3] = 0;  // valid during the call only: nothing for the app to release
+            img.reserved[2] = img.reserved[3] = 0;  // valid during the call only: nothing for the app to release
             l.unlock();
             if (job->status != GAIL_OK) g_lastError = job->error;
             cfg.on_image(cfg.user, &img);
@@ -315,8 +382,9 @@ int prepareDestination(gail_decoder* d, Job& job, const gail_image* dest) {
         job.stride = stride;
         return GAIL_OK;
     }
-    job.dst = static_cast<uint8_t*>(std::malloc((size_t)tight * (size_t)d->outH));
+    job.dst = static_cast<uint8_t*>(d->pool->take());
     if (!job.dst) return fail(GAIL_ERROR_NOMEM, "out of memory");
+    job.pool = d->pool;
     job.ownedDst = true;
     job.stride = tight;
     return GAIL_OK;
@@ -356,9 +424,9 @@ int gail_probe(const void* data, size_t size, gail_stream_info* info) {
 void gail_image_free(gail_image* img) {
     if (!img) return;
     if (img->reserved[3] == kOwnedImage) {
-        std::free(img->data[0]);
+        reinterpret_cast<ImagePool*>((uintptr_t)img->reserved[2])->give(img->data[0]);
         img->data[0] = nullptr;
-        img->reserved[3] = 0;
+        img->reserved[2] = img->reserved[3] = 0;
     }
 }
 
@@ -443,7 +511,9 @@ void gail_decoder_destroy(gail_decoder* d) {
     if (!d) return;
     gail_decoder_cancel(d);
     d->shutDown();
-    delete d;
+    ImagePool* pool = d->pool;
+    delete d;  // with the jobs still holding buffers
+    if (pool) pool->close();
 }
 
 const char* gail_decoder_devices(const gail_decoder* d) { return d ? d->devicesDesc.c_str() : ""; }
