@@ -8,8 +8,8 @@ release is binary compatible with the ones before it (see
 
 ## Unreleased
 
-A decoder. Everything the 1.0 header declared is unchanged, and the encoder writes the
-same codestreams as 1.0.1 for the same input and settings.
+A decoder. Everything the 1.0 header declared is unchanged. The encoder codes frames as
+1.0.1 does, except that the COM marker now names the kind of device that encoded each one.
 
 ### Library
 
@@ -25,6 +25,11 @@ same codestreams as 1.0.1 for the same input and settings.
   decoded here.
 * Codestreams are untrusted input. A damaged or unsupported one fails on its own, with
   the reason in `gail_last_error()`, and the decoder carries on with the next.
+* The COM marker of every frame names the kind of device that encoded it after the version:
+  `vulk` for Vulkan, `cuda` and the toolkit version for CUDA (`GAIL 1.1.0 cuda13.4`),
+  nothing for the CPU. The frame budget allows for the longest tag, which leaves 10 bytes
+  fewer for coded data than 1.0.1 did, so a frame at the bitrate cap can occasionally
+  come out slightly different. See [docs/LIBRARY.md](docs/LIBRARY.md#versions).
 * JPEG 2000 outside the DCI profiles (5/3 lossless, other bit depths or component counts,
   several tiles or quality layers, HTJ2K) is recognized and refused, not decoded.
 
