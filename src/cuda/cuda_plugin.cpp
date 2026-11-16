@@ -214,7 +214,8 @@ int decoderDecode(GailCudaDecoder* d, const GailCudaLayout* frame, const uint8_t
     });
 }
 
-const GailCudaPlugin kPlugin = {
+// constexpr: the table is in the DLL's image as built, with nothing run when it loads.
+constexpr GailCudaPlugin kPlugin = {
     GAIL_CUDA_PLUGIN_ABI,
     (uint32_t)sizeof(GailCudaPlugin),
     cudaPluginLayout(),

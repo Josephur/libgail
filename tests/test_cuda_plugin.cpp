@@ -28,10 +28,12 @@ struct Gpu {
 
 // Both stand-ins see the same five GPUs, as two CUDA runtimes on one machine would, but
 // number them differently, so the tests also cover matching them up by UUID.
-const bool kIs13 = std::strcmp(TEST_PLUGIN_NAME, "gail_cuda13") == 0;
-const Gpu kGpus13[] = {{"Test Ampere", 8, 6}, {"Test Maxwell", 5, 2}, {"Test Turing", 7, 5}, {"Test Volta", 7, 0}, {"Test Kepler", 3, 5}};
-const Gpu kGpus12[] = {{"Test Maxwell", 5, 2}, {"Test Turing", 7, 5}, {"Test Volta", 7, 0}, {"Test Kepler", 3, 5}, {"Test Ampere", 8, 6}};
-const Gpu* const kGpus = kIs13 ? kGpus13 : kGpus12;
+// Compile-time, so that the plugin's table below needs no code run when the DLL loads.
+constexpr bool sameText(const char* a, const char* b) { return *a == *b && (*a == 0 || sameText(a + 1, b + 1)); }
+constexpr bool kIs13 = sameText(TEST_PLUGIN_NAME, "gail_cuda13");
+constexpr Gpu kGpus13[] = {{"Test Ampere", 8, 6}, {"Test Maxwell", 5, 2}, {"Test Turing", 7, 5}, {"Test Volta", 7, 0}, {"Test Kepler", 3, 5}};
+constexpr Gpu kGpus12[] = {{"Test Maxwell", 5, 2}, {"Test Turing", 7, 5}, {"Test Volta", 7, 0}, {"Test Kepler", 3, 5}, {"Test Ampere", 8, 6}};
+constexpr const Gpu* kGpus = kIs13 ? kGpus13 : kGpus12;
 const int kNumGpus = 5;
 
 thread_local std::string g_error = "no error";
@@ -110,7 +112,7 @@ int decoderDecode(GailCudaDecoder*, const GailCudaLayout*, const uint8_t*, size_
     return unsupported();
 }
 
-const GailCudaPlugin kPlugin = {
+constexpr GailCudaPlugin kPlugin = {
     TEST_PLUGIN_MODE == 1 ? GAIL_CUDA_PLUGIN_ABI + 1 : GAIL_CUDA_PLUGIN_ABI,
     (uint32_t)sizeof(GailCudaPlugin),
     gail::cudaPluginLayout(),
