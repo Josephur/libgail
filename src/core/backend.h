@@ -140,6 +140,9 @@ std::vector<std::unique_ptr<Device>> createCudaDevices(const std::vector<int>& s
 std::vector<DeviceInfo> listCudaDevices();
 // Why the CUDA device with this index cannot be used: "" when it can, or there is none.
 std::string cudaDeviceUnusable(int index);
+// Why the last createCudaDevices() on this thread left out the device with this index,
+// which stays listed for the next call to try (out of memory, busy): "" when it did not.
+std::string cudaDeviceSkipped(int index);
 // The state of the backend, a line each: the plugins loaded, or why not, and the devices
 // that cannot be used.
 std::vector<std::string> cudaBackendNotes();

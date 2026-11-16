@@ -11,7 +11,9 @@
 //                      2  a plugin that turns the library's interface version down
 //                      3  a plugin whose CUDA runtime does not start (no driver)
 //                      4  a working plugin on a busy machine: its kernels do not load on
-//                         the Volta GPU, whose memory is full
+//                         the Volta GPU the first time, its memory being full, and do
+//                         the next
+//                      5  a plugin that turns out to have no code for the Volta GPU
 #define GAIL_CUDA_PLUGIN_BUILD 1  // exports the entry point, as a plugin's build does
 #include "cuda/cuda_plugin.h"
 
@@ -67,9 +69,14 @@ int deviceDesc(int index, GailCudaDeviceDesc* out) {
 // one for Maxwell to Volta, whose Volta code a Turing GPU could run as well.
 int deviceUsable(int index) {
     const int sm = kGpus[index].major * 10 + kGpus[index].minor;
-    if (TEST_PLUGIN_MODE == 4 && sm == 70) {
+    static int voltaTries = 0;
+    if (TEST_PLUGIN_MODE == 4 && sm == 70 && voltaTries++ == 0) {
         g_error = "out of memory";
         return GAIL_CUDA_ERROR;
+    }
+    if (TEST_PLUGIN_MODE == 5 && sm == 70) {
+        g_error = "not built for this architecture";
+        return GAIL_CUDA_NO_CODE;
     }
     if (kIs13 ? sm >= 75 : (sm >= 50 && sm <= 75)) return GAIL_CUDA_OK;
     g_error = "not built for this architecture";

@@ -56,8 +56,10 @@ A decoder. Everything the 1.0 header declared is unchanged. The encoder codes fr
   goes on to Vulkan when CUDA can run none of the GPUs.
 * Listing devices goes by each GPU's architecture and sets nothing up on it: no CUDA
   context and no device memory stays behind. The kernels are loaded when an encoder or
-  decoder sets a GPU up, and a GPU they do not load on (a full one, for instance) is left
-  out then, with the reason.
+  decoder sets a GPU up, and a GPU they do not load on is left out then, with the reason:
+  for good when the plugin has no code it runs, for that encoder or decoder only when
+  they cannot load now (its memory full, the GPU busy or in exclusive use), so that a
+  later one tries it again.
 * With `GAIL_BACKEND_CUDA`, a GPU that has no code in either plugin, or that its kernels
   do not load on, is left out like that too; creating the encoder or decoder fails, with
   the reason, only when that GPU was named in `devices` / `device_ids` or no CUDA GPU is

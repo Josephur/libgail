@@ -1134,7 +1134,8 @@ std::vector<CudaDeviceDesc> cudaEnumerate() {
     return out;
 }
 
-std::string cudaKernelsUnusable(int device) {
+std::string cudaKernelsUnusable(int device, bool* noCode) {
+    if (noCode) *noCode = false;
     cudaError_t e = cudaSetDevice(device);
     if (e == cudaSuccess) {
         // Any kernel will do: asking for its attributes loads this build's code for the
@@ -1144,8 +1145,11 @@ std::string cudaKernelsUnusable(int device) {
     }
     if (e == cudaSuccess) return "";
     cudaGetLastError();
-    if (e == cudaErrorNoKernelImageForDevice || e == cudaErrorInvalidDeviceFunction) return "not built for this architecture";
-    return cudaGetErrorString(e);
+    if (e == cudaErrorNoKernelImageForDevice || e == cudaErrorInvalidDeviceFunction) {
+        if (noCode) *noCode = true;  // nothing here will ever run on it
+        return "not built for this architecture";
+    }
+    return cudaGetErrorString(e);  // out of memory, busy, exclusive: may pass later
 }
 
 std::unique_ptr<Device> createCudaDevice(int device, const Logger& log) { return std::make_unique<CudaDevice>(device, log); }

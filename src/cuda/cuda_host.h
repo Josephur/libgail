@@ -54,9 +54,15 @@ public:
     // nothing up on them (no context, no device memory): a GPU is offered when its
     // plugin has code for its architecture (cudaArchsRun). Later calls answer from that.
     std::vector<DeviceInfo> list();
-    // Sets the devices up. One whose kernels do not load (device_usable) is left out
-    // with a warning, and from then on is not listed and unusable() says why.
+    // Sets the devices up. One the plugin has no code for (device_usable says
+    // GAIL_CUDA_NO_CODE) is left out with a warning, and from then on is not listed and
+    // unusable() says why. One whose kernels cannot load now (GAIL_CUDA_ERROR: out of
+    // memory, busy), or that fails to be set up, is left out of this call's devices
+    // only, with a warning: it stays listed, and skipped() says why.
     std::vector<std::unique_ptr<Device>> create(const std::vector<int>& select, const Logger& log);
+    // Why the last create() on the calling thread left out this listed device for now;
+    // "" when it did not.
+    static std::string skipped(int index);
     // Why the device with this index is not in list(): "" when it is, or there is none.
     std::string unusable(int index);
     // A line for each plugin (what it is, or why it is not loaded) and for each device

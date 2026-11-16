@@ -25,7 +25,7 @@ std::vector<CudaDeviceDesc> cudaEnumerate();
 // Whether this build's kernels can run on a device: loads them with the device current,
 // as a launch would, which also covers code the driver compiles from PTX. Returns ""
 // when they can, else the reason.
-std::string cudaKernelsUnusable(int device);
+std::string cudaKernelsUnusable(int device, bool* noCode = nullptr);
 
 std::unique_ptr<Device> createCudaDevice(int device, const Logger& log);
 

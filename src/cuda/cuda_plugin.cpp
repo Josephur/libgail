@@ -101,10 +101,12 @@ int deviceDesc(int index, GailCudaDeviceDesc* out) {
 }
 
 int deviceUsable(int index) {
-    return guarded([&] {
-        const std::string why = cudaKernelsUnusable(devices().at((size_t)index).info.index);
-        if (!why.empty()) throw std::runtime_error(why);
-    });
+    bool noCode = false;
+    std::string why;
+    if (const int r = guarded([&] { why = cudaKernelsUnusable(devices().at((size_t)index).info.index, &noCode); })) return r;
+    if (why.empty()) return GAIL_CUDA_OK;
+    g_error = why;
+    return noCode ? GAIL_CUDA_NO_CODE : GAIL_CUDA_ERROR;
 }
 
 int deviceCreate(int index, GailCudaLog log, void* user, GailCudaDevice** out) {

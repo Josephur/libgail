@@ -532,7 +532,18 @@ std::vector<std::string> CudaHost::notes() {
     return out;
 }
 
+namespace {
+// Listed devices the last create() on this thread left out for now, and why
+thread_local std::map<int, std::string> t_skipped;
+}  // namespace
+
+std::string CudaHost::skipped(int index) {
+    const auto it = t_skipped.find(index);
+    return it == t_skipped.end() ? std::string() : it->second;
+}
+
 std::vector<std::unique_ptr<Device>> CudaHost::create(const std::vector<int>& select, const Logger& log) {
+    t_skipped.clear();
     std::vector<Entry> entries;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -546,9 +557,19 @@ std::vector<std::unique_ptr<Device>> CudaHost::create(const std::vector<int>& se
         if (!e.plugin) continue;
         if (!select.empty() && std::find(select.begin(), select.end(), e.info.index) == select.end()) continue;
         // The kernels must load on the device, as a launch would load them (or have the
-        // driver compile them from PTX). A device where they do not is set aside, with
-        // the reason, as listing sets aside one the plugin has no code for.
-        if (e.plugin->api->device_usable(e.local) != GAIL_CUDA_OK) {
+        // driver compile them from PTX). A device the plugin turns out to have no code for
+        // is set aside for good, with the reason, as listing sets aside one whose
+        // architecture it lacks. One where they cannot load now (out of memory, busy,
+        // in exclusive use) is only left out of this set of devices: it stays listed, and
+        // the next encoder or decoder tries it again.
+        if (const int usable = e.plugin->api->device_usable(e.local); usable == GAIL_CUDA_ERROR) {
+            const std::string reason = "skipped by " + e.plugin->spec.name + " for now: " + e.plugin->api->last_error();
+            t_skipped[e.info.index] = reason;
+            if (log)
+                log(LogLevel::Warning, "cuda: device " + std::to_string(e.info.index) + " " + e.info.name + " (" + e.sm + ") " + reason +
+                                           " (it stays listed and is tried again next time)");
+            continue;
+        } else if (usable != GAIL_CUDA_OK) {
             const std::string reason = "skipped by " + e.plugin->spec.name + ": " + e.plugin->api->last_error();
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -569,6 +590,7 @@ std::vector<std::unique_ptr<Device>> CudaHost::create(const std::vector<int>& se
         shared->tag = " [" + e.plugin->spec.name + "]";
 #endif
         if (shared->api->device_create(e.local, Shared::logThunk, shared.get(), &shared->device) != GAIL_CUDA_OK) {
+            t_skipped[e.info.index] = std::string("not set up: ") + shared->api->last_error();
             if (log) log(LogLevel::Warning, "cuda: skipping device " + std::to_string(e.info.index) + ": " + shared->api->last_error());
             continue;
         }
@@ -586,6 +608,8 @@ std::vector<std::unique_ptr<Device>> createCudaDevices(const std::vector<int>& s
 std::vector<DeviceInfo> listCudaDevices() { return CudaHost::instance().list(); }
 
 std::string cudaDeviceUnusable(int index) { return CudaHost::instance().unusable(index); }
+
+std::string cudaDeviceSkipped(int index) { return CudaHost::skipped(index); }
 
 std::vector<std::string> cudaBackendNotes() { return CudaHost::instance().notes(); }
 

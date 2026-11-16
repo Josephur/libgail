@@ -160,15 +160,18 @@ std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const st
 #ifdef GAIL_HAVE_CUDA
         // A device that was asked for by name and cannot be used is an error; it is not
         // left out without a word. Listing rules out the GPUs a plugin has no code for,
-        // creating a device the ones its kernels do not load on.
-        auto unusable = [&] {
-            for (int i : picked)
-                if (const std::string why = cudaDeviceUnusable(i); !why.empty())
-                    throw std::runtime_error("cuda device " + std::to_string(i) + " cannot be used: " + why);
+        // creating a device the ones its kernels do not load on: for good when there is no
+        // code for them after all, for this call only when they cannot load now.
+        auto unusable = [&](bool created) {
+            for (int i : picked) {
+                std::string why = cudaDeviceUnusable(i);
+                if (why.empty() && created) why = cudaDeviceSkipped(i);
+                if (!why.empty()) throw std::runtime_error("cuda device " + std::to_string(i) + " cannot be used: " + why);
+            }
         };
-        unusable();
+        unusable(false);
         devices = createCudaDevices(picked, log);
-        unusable();
+        unusable(true);
         if (devices.empty()) throw std::runtime_error("no usable cuda devices" + cudaNotes());
 #else
         throw std::runtime_error("built without CUDA support");

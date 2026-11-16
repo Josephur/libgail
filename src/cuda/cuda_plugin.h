@@ -54,7 +54,12 @@ enum GailCudaStatus {
     GAIL_CUDA_ERROR = 1,          // std::runtime_error on the library's side
     GAIL_CUDA_DEVICE_MEMORY = 2,  // gail::DeviceOutOfMemory: the device stays usable
     GAIL_CUDA_HOST_MEMORY = 3,    // std::bad_alloc
-    GAIL_CUDA_MISUSE = 4          // std::logic_error
+    GAIL_CUDA_MISUSE = 4,         // std::logic_error
+    // device_usable() only: the plugin has no code the device can run, and never will
+    // (as opposed to GAIL_CUDA_ERROR: it cannot run it now, e.g. out of memory or busy).
+    // A library that predates it takes it as GAIL_CUDA_ERROR, so it needs no new
+    // GAIL_CUDA_PLUGIN_ABI.
+    GAIL_CUDA_NO_CODE = 5
 };
 
 // level: gail::LogLevel as an int.
@@ -153,7 +158,9 @@ struct GailCudaPlugin {
     int (*device_desc)(int index, GailCudaDeviceDesc* out);
     // Whether the plugin's kernels can run on the device. This loads them with the
     // device current, as a launch would, so it also covers code the driver has to
-    // compile from PTX. GAIL_CUDA_ERROR and the reason when they cannot. It sets the
+    // compile from PTX. GAIL_CUDA_NO_CODE and the reason when the plugin has no code for
+    // the device, GAIL_CUDA_ERROR and the reason when they cannot be loaded now (out of
+    // memory, the device busy or in exclusive use by another process). It sets the
     // device up (a CUDA context), so the library calls it when it creates a device,
     // never when it only lists them.
     int (*device_usable)(int index);

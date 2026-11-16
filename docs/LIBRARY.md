@@ -91,11 +91,15 @@ and newer the CUDA 13.4 plugin.
   `gail_enumerate_devices()` starts each plugin's CUDA runtime, which takes a few tens of
   milliseconds the first time in a process, and leaves no device memory in use. Whether
   the kernels really load on the GPU is found out when an encoder or decoder sets it up. A
-  GPU where they do not, such as one whose memory is full, is then left out with the
-  reason at `GAIL_LOG_WARNING`, and the others are used: `GAIL_BACKEND_AUTO` carries on
-  with the other CUDA GPUs, or with Vulkan when none is left. `GAIL_BACKEND_CUDA` carries
-  on with the other CUDA GPUs too, and fails only when that GPU was one of those named in
-  `devices` / `device_ids`, or when no CUDA GPU is left.
+  GPU where they do not is left out of that encoder or decoder, with the reason at
+  `GAIL_LOG_WARNING`, and the others are used. When the plugin turns out to have no code
+  the GPU runs, it is left out for good: it is no longer listed, and `--list-devices` /
+  the log say why. When the kernels cannot load now (the GPU's memory is full, or it is
+  busy or in exclusive use by another process), it stays listed, and the next encoder or
+  decoder tries it again. `GAIL_BACKEND_AUTO` carries on with the other CUDA GPUs, or with
+  Vulkan when none is left. `GAIL_BACKEND_CUDA` carries on with the other CUDA GPUs too,
+  and fails only when the GPU left out was one of those named in `devices` /
+  `device_ids`, or when no CUDA GPU is left.
 * **Static library.** `libgail.a` cannot carry plugins, so it has one backend linked in:
   the CUDA 13 one when the build had both toolkits. It serves the GPUs that backend has
   code for.
