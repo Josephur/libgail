@@ -10,6 +10,7 @@
 #include "cuda/cuda_host.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <map>
 #include <new>
@@ -41,9 +42,12 @@ int smOf(const GailCudaDeviceDesc& d) { return d.smMajor * 10 + d.smMinor; }
 
 // "cuda13.4" for a plugin built with CUDA 13.4.92: the toolkit's major.minor.
 std::string cudaCodestreamTag(const char* toolkit) {
-    std::string v = toolkit ? toolkit : "";
-    const size_t dot = v.find('.');
-    if (dot != std::string::npos) v = v.substr(0, v.find('.', dot + 1));
+    std::string v;
+    int dots = 0;
+    for (const char* c = toolkit ? toolkit : ""; *c && (std::isdigit((unsigned char)*c) || *c == '.'); ++c) {
+        if (*c == '.' && ++dots == 2) break;
+        v += *c;
+    }
     return ("cuda" + v).substr(0, kMaxDeviceTagBytes);
 }
 
