@@ -374,6 +374,28 @@ if(GAIL_BUILD_TESTS)
   target_link_libraries(gail-tests PRIVATE gail_io ${GAIL_TOOL_BACKEND_LIBS})
   add_test(NAME gail-tests COMMAND gail-tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+  if(TARGET gail_cuda_host)
+    # Stand-ins for the CUDA plugins, for the loader's tests, which then need no GPU and no
+    # CUDA runtime. Each is in a directory of its own under the name the loader looks for,
+    # in test-plugins/ next to gail-tests.
+    function(gail_test_plugin dir plugin mode)
+      set(target gail_test_plugin_${dir})
+      add_library(${target} MODULE tests/test_cuda_plugin.cpp)
+      target_include_directories(${target} PRIVATE src)
+      target_compile_definitions(${target} PRIVATE TEST_PLUGIN_NAME="${plugin}" TEST_PLUGIN_MODE=${mode})
+      set_target_properties(${target} PROPERTIES OUTPUT_NAME ${plugin}
+        LIBRARY_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:gail-tests>/test-plugins/${dir}
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:gail-tests>/test-plugins/${dir})
+      add_dependencies(gail-tests ${target})
+    endfunction()
+    gail_test_plugin(cuda13 gail_cuda13 0)     # modes: see tests/test_cuda_plugin.cpp
+    gail_test_plugin(cuda12 gail_cuda12 0)
+    gail_test_plugin(other_abi gail_cuda13 1)
+    gail_test_plugin(declines gail_cuda12 2)
+    gail_test_plugin(no_driver gail_cuda13 3)
+    target_compile_definitions(gail-tests PRIVATE GAIL_TEST_PLUGINS=1)
+  endif()
+
   # public API, compiled as C against the installed-style header
   add_executable(gail-api-test tests/test_api.c)
   target_link_libraries(gail-api-test PRIVATE ${GAIL_LINK} Threads::Threads)

@@ -33,6 +33,9 @@
 #include "core/t2_parse.h"
 #include "core/tagtree.h"
 #include "core/thread_pool.h"
+#ifdef GAIL_HAVE_CUDA
+#include "cuda/cuda_host.h"
+#endif
 
 #define MQ_OUT_T uint8_t*
 #define MQ_PUT(o, i, v) ((o)[(i)] = (uint8_t)(v))
@@ -63,6 +66,182 @@ static int g_fail = 0;
             ++g_fail;                                     \
         }                                                 \
     } while (0)
+
+// The GPUs the tests run on: all that a backend offers, unless the environment says
+// otherwise.
+//   GAIL_TEST_GPUS         a comma-separated list of GPUs, each by its UUID as nvidia-smi -L
+//                          prints it or by its PCI bus ID: the tests leave every other GPU
+//                          alone. Both name the same GPU under CUDA and under Vulkan.
+//   GAIL_TEST_CUDA_PLUGIN  gail_cuda13 or gail_cuda12: the CUDA tests use that plugin for
+//                          every GPU it can run, whatever the GPU's architecture. This is how
+//                          a plugin is tested on a GPU that libgail would not give it.
+[[maybe_unused]] static std::vector<std::unique_ptr<Device>> testGpus(bool cuda, const Logger& log) {
+    auto normal = [](std::string id) {
+        for (auto& c : id) c = (char)std::tolower((unsigned char)c);
+        if (id.rfind("gpu-", 0) == 0) id = id.substr(4);
+        if (std::count(id.begin(), id.end(), ':') == 1) id = "0000:" + id;
+        return id;
+    };
+    std::vector<std::string> only;
+    if (const char* env = std::getenv("GAIL_TEST_GPUS")) {
+        std::string list = env;
+        for (size_t at = 0; at <= list.size();) {
+            const size_t end = std::min(list.find(',', at), list.size());
+            if (end > at) only.push_back(normal(list.substr(at, end - at)));
+            at = end + 1;
+        }
+    }
+    // Indices of the wanted GPUs among a backend's devices; false when none is wanted.
+    auto pick = [&](const std::vector<DeviceInfo>& devices, std::vector<int>& select) {
+        if (only.empty()) return !devices.empty();
+        for (const auto& d : devices)
+            if (std::find(only.begin(), only.end(), normal(d.uuid)) != only.end() ||
+                std::find(only.begin(), only.end(), normal(d.pciBusId)) != only.end())
+                select.push_back(d.index);
+        return !select.empty();
+    };
+    std::vector<int> select;
+#ifdef GAIL_HAVE_CUDA
+    if (cuda) {
+        if (const char* plugin = std::getenv("GAIL_TEST_CUDA_PLUGIN")) {
+            static CudaHost host(CudaHost::moduleDirectories(), {{plugin}});
+            return pick(host.list(), select) ? host.create(select, log) : std::vector<std::unique_ptr<Device>>();
+        }
+        return pick(listCudaDevices(), select) ? createCudaDevices(select, log) : std::vector<std::unique_ptr<Device>>();
+    }
+#endif
+#ifdef GAIL_HAVE_VULKAN
+    if (!cuda && pick(listVulkanDevices(), select)) return createVulkanDevices(select, log);
+#endif
+    // a build without a GPU backend uses none of these
+    (void)cuda;
+    (void)log;
+    (void)pick;
+    return {};
+}
+
+#ifdef GAIL_TEST_PLUGINS
+// The CUDA backend's plugin loader, on stand-ins for the plugins (tests/test_cuda_plugin.cpp)
+// with five made-up GPUs: which plugins load, and which one each GPU is given to. The build
+// puts the stand-ins in test-plugins/ next to this program.
+static void testCudaPlugins() {
+    namespace fs = std::filesystem;
+    const auto specs = cudaPluginSpecs();
+    CHECK(specs.size() == 2 && specs[0].name == "gail_cuda13" && specs[0].minSm == 75 && specs[1].name == "gail_cuda12" &&
+              specs[1].maxSm == 74,
+          "the rule is not Turing and newer on gail_cuda13, older on gail_cuda12");
+
+    // The one place the library looks: the directory of the module the loader is in, here this program's.
+    std::error_code ec;
+    const fs::path own = CudaHost::moduleDirectory();
+    CHECK(!own.empty() && own.is_absolute() && (fs::exists(own / "gail-tests", ec) || fs::exists(own / "gail-tests.exe", ec)),
+          "module directory \"%s\" is not where gail-tests is", own.string().c_str());
+    const auto dirs = CudaHost::moduleDirectories();
+    CHECK(!dirs.empty() && dirs[0] == own, "the module's own directory is not searched first");
+
+    const fs::path standIns = own / "test-plugins";
+    if (!fs::is_directory(standIns / "cuda13", ec)) {
+        std::printf("  (skipped: the stand-in plugins are not next to gail-tests)\n");
+        return;
+    }
+    const fs::path cuda13 = standIns / "cuda13", cuda12 = standIns / "cuda12", otherAbi = standIns / "other_abi",
+                   declines = standIns / "declines", noDriver = standIns / "no_driver", none = standIns;  // none: no plugin file in it
+    auto listed = [](CudaHost& h) {
+        std::string s;
+        for (const auto& d : h.list()) s += (s.empty() ? "" : " | ") + std::to_string(d.index) + " " + d.name + " " + d.plugin;
+        return s;
+    };
+    auto made = [](const std::vector<std::unique_ptr<Device>>& devices) {
+        std::string s;
+        for (const auto& d : devices) s += (s.empty() ? "" : " | ") + d->name();
+        return s;
+    };
+    auto has = [](const std::vector<std::string>& lines, const std::string& text) {
+        return std::any_of(lines.begin(), lines.end(), [&](const std::string& l) { return l.find(text) != std::string::npos; });
+    };
+    std::vector<std::string> said;
+    int warnings = 0;
+    const Logger log = [&](LogLevel level, const std::string& m) {
+        said.push_back(m);
+        warnings += level == LogLevel::Warning;
+    };
+
+    {  // no plugins: nothing to offer, nothing fails, and the log says why at info level
+        CudaHost h({none}, specs);
+        CHECK(h.loaded().empty() && h.list().empty(), "no plugins: loaded \"%s\", devices \"%s\"", h.loaded().c_str(), listed(h).c_str());
+        said.clear();
+        warnings = 0;
+        CHECK(h.create({}, log).empty(), "no plugins: a device was made");
+        CHECK(has(said, "gail_cuda13 not loaded: " + CudaHost::fileName("gail_cuda13") + " is not next to the gail library") &&
+                  has(said, "gail_cuda12 not loaded: ") && warnings == 0,
+              "no plugins: %zu lines logged, %d of them warnings", said.size(), warnings);
+        CHECK(h.unusable(0).empty(), "no plugins: there is no device 0");
+    }
+    {  // nowhere to look: the same
+        CudaHost h({}, specs);
+        CHECK(h.loaded().empty() && h.list().empty() && has(h.notes(), "gail_cuda13 not loaded"), "no directory: \"%s\"", listed(h).c_str());
+    }
+    {  // both plugins: each GPU on the one its architecture belongs to, whatever number that plugin has it under
+        CudaHost h({cuda13, cuda12}, specs);
+        CHECK(h.loaded() == "gail_cuda13 gail_cuda12", "both: loaded \"%s\"", h.loaded().c_str());
+        const std::string want = "0 Test Ampere gail_cuda13 | 1 Test Maxwell gail_cuda12 | 2 Test Turing gail_cuda13 | 3 Test Volta gail_cuda12";
+        CHECK(listed(h) == want, "both: devices \"%s\"", listed(h).c_str());
+        CHECK(h.unusable(0).empty() && h.unusable(3).empty() && h.unusable(7).empty(), "both: a usable or absent device has a reason");
+        CHECK(h.unusable(4) == "Test Kepler (sm_35) skipped by gail_cuda12: not built for this architecture", "both: Kepler: \"%s\"",
+              h.unusable(4).c_str());
+        said.clear();
+        warnings = 0;
+        const std::string all = made(h.create({}, log));
+        CHECK(all == "Test Ampere (CUDA) on gail_cuda13 | Test Maxwell (CUDA) on gail_cuda12 | Test Turing (CUDA) on gail_cuda13 | "
+                     "Test Volta (CUDA) on gail_cuda12",
+              "both: made \"%s\"", all.c_str());
+        CHECK(has(said, "gail_cuda13 loaded: CUDA 0.0 (test), sm 75 86 89 120") && has(said, "Test Maxwell [gail_cuda12]") &&
+                  has(said, "device 4 Test Kepler (sm_35) skipped by gail_cuda12") && warnings == 0,
+              "both: %zu lines logged, %d of them warnings", said.size(), warnings);
+        const std::string two = made(h.create({3, 1}, log));
+        CHECK(two == "Test Maxwell (CUDA) on gail_cuda12 | Test Volta (CUDA) on gail_cuda12", "both: devices 1 and 3 made \"%s\"", two.c_str());
+        CHECK(h.create({4}, log).empty(), "both: the Kepler GPU was made");
+    }
+    {  // gail_cuda12 missing: Turing and newer still work, the older GPUs are not offered
+        CudaHost h({cuda13}, specs);
+        CHECK(h.loaded() == "gail_cuda13", "only gail_cuda13: loaded \"%s\"", h.loaded().c_str());
+        CHECK(listed(h) == "0 Test Ampere gail_cuda13 | 2 Test Turing gail_cuda13", "only gail_cuda13: devices \"%s\"", listed(h).c_str());
+        CHECK(h.unusable(1) == "Test Maxwell (sm_52) skipped: it needs gail_cuda12, which is not loaded", "only gail_cuda13: Maxwell: \"%s\"",
+              h.unusable(1).c_str());
+        CHECK(has(h.notes(), "gail_cuda12 not loaded: ") && has(h.notes(), "device 3 Test Volta (sm_70) skipped: it needs gail_cuda12"),
+              "only gail_cuda13: notes");
+        CHECK(made(h.create({}, log)) == "Test Ampere (CUDA) on gail_cuda13 | Test Turing (CUDA) on gail_cuda13", "only gail_cuda13: made");
+    }
+    {  // gail_cuda13 missing: a Turing GPU is not handed to gail_cuda12, though its Volta code would run there
+        CudaHost h({cuda12}, specs);
+        CHECK(listed(h) == "0 Test Maxwell gail_cuda12 | 2 Test Volta gail_cuda12", "only gail_cuda12: devices \"%s\"", listed(h).c_str());
+        CHECK(h.unusable(1) == "Test Turing (sm_75) skipped: it needs gail_cuda13, which is not loaded", "only gail_cuda12: Turing: \"%s\"",
+              h.unusable(1).c_str());
+        CHECK(!h.unusable(4).empty(), "only gail_cuda12: Ampere is usable");
+    }
+    {  // plugins of another interface version, one that says so itself and one that does not: neither is used
+        CudaHost h({otherAbi, declines}, specs);
+        CHECK(h.loaded().empty() && h.list().empty(), "other ABI: loaded \"%s\", devices \"%s\"", h.loaded().c_str(), listed(h).c_str());
+        const auto notes = h.notes();
+        CHECK(has(notes, "gail_cuda13 not loaded: it was built for another version of the gail library (plugin interface 2, this library has 1)") &&
+                  has(notes, "gail_cuda12 not loaded: it was built for another version of the gail library (plugin interface unknown"),
+              "other ABI: notes");
+        CHECK(h.create({}, log).empty(), "other ABI: a device was made");
+    }
+    {  // a plugin whose CUDA runtime does not start (no driver, or too old a one): its GPUs are not offered, the other plugin's are
+        CudaHost h({noDriver, cuda12}, specs);
+        CHECK(h.loaded() == "gail_cuda13 gail_cuda12", "no driver: loaded \"%s\"", h.loaded().c_str());
+        CHECK(listed(h) == "0 Test Maxwell gail_cuda12 | 2 Test Volta gail_cuda12", "no driver: devices \"%s\"", listed(h).c_str());
+        CHECK(h.unusable(4) == "Test Ampere (sm_86) skipped: it needs gail_cuda13, whose CUDA runtime did not start: no NVIDIA driver",
+              "no driver: Ampere: \"%s\"", h.unusable(4).c_str());
+        CHECK(has(h.notes(), "gail_cuda13 cannot be used: no NVIDIA driver"), "no driver: notes");
+    }
+    {  // the first directory that has a plugin's file is the one it comes from
+        CudaHost h({otherAbi, cuda13}, specs);
+        CHECK(h.loaded().empty(), "directory order: loaded \"%s\"", h.loaded().c_str());
+    }
+}
+#endif
 
 static void testDwtRoundTrip() {
     const int W = 301, H = 157, NL = 5;
@@ -229,9 +408,9 @@ static void testGpu(Profile prof, bool cuda) {
     es.input = src->format();
     std::vector<std::unique_ptr<Device>> devs;
 #ifdef GAIL_HAVE_CUDA
-    if (cuda) devs = createCudaDevices({}, stderrLogger(true));
+    if (cuda) devs = testGpus(true, stderrLogger(true));
 #endif
-    if (!cuda) devs = createVulkanDevices({}, stderrLogger(true));
+    if (!cuda) devs = testGpus(false, stderrLogger(true));
     if (devs.empty()) {
         std::printf("  (skipped: no %s devices on this machine)\n", cuda ? "CUDA" : "Vulkan");
         return;
@@ -491,10 +670,10 @@ static void testYuv(Profile prof) {
     };
     compare("FFmpeg RGB48 conversion", viaRgb, 40.0);
 #ifdef GAIL_HAVE_VULKAN
-    for (auto& d : createVulkanDevices({}, stderrLogger(false))) compare(d->name().c_str(), xyzOf(*d, yf, fy), 70.0);
+    for (auto& d : testGpus(false, stderrLogger(false))) compare(d->name().c_str(), xyzOf(*d, yf, fy), 70.0);
 #endif
 #ifdef GAIL_HAVE_CUDA
-    for (auto& d : createCudaDevices({}, stderrLogger(false))) compare(d->name().c_str(), xyzOf(*d, yf, fy), 70.0);
+    for (auto& d : testGpus(true, stderrLogger(false))) compare(d->name().c_str(), xyzOf(*d, yf, fy), 70.0);
 #endif
 }
 
@@ -542,10 +721,10 @@ static void testPlanar() {
     auto cpu = createCpuDevice(0);
     std::vector<std::unique_ptr<Device>> gpus;
 #ifdef GAIL_HAVE_VULKAN
-    for (auto& d : createVulkanDevices({}, stderrLogger(false))) gpus.push_back(std::move(d));
+    for (auto& d : testGpus(false, stderrLogger(false))) gpus.push_back(std::move(d));
 #endif
 #ifdef GAIL_HAVE_CUDA
-    for (auto& d : createCudaDevices({}, stderrLogger(false))) gpus.push_back(std::move(d));
+    for (auto& d : testGpus(true, stderrLogger(false))) gpus.push_back(std::move(d));
 #endif
     for (const Layout& l : layouts) {
         FrameFormat f;
@@ -718,10 +897,10 @@ static void testGpuColor(bool cuda) {
     src->read(rgb.data());
     std::vector<std::unique_ptr<Device>> devs;
 #ifdef GAIL_HAVE_CUDA
-    if (cuda) devs = createCudaDevices({}, stderrLogger(false));
+    if (cuda) devs = testGpus(true, stderrLogger(false));
 #endif
 #ifdef GAIL_HAVE_VULKAN
-    if (!cuda) devs = createVulkanDevices({}, stderrLogger(false));
+    if (!cuda) devs = testGpus(false, stderrLogger(false));
 #endif
     if (devs.empty()) return;
     struct Mode {
@@ -828,10 +1007,10 @@ static void testFitSlots() {
 static void testGpuMemory(bool cuda) {
     std::vector<std::unique_ptr<Device>> devs;
 #ifdef GAIL_HAVE_CUDA
-    if (cuda) devs = createCudaDevices({}, stderrLogger(false));
+    if (cuda) devs = testGpus(true, stderrLogger(false));
 #endif
 #ifdef GAIL_HAVE_VULKAN
-    if (!cuda) devs = createVulkanDevices({}, stderrLogger(false));
+    if (!cuda) devs = testGpus(false, stderrLogger(false));
 #endif
     if (devs.empty()) {
         std::printf("  (skipped: no %s devices on this machine)\n", cuda ? "CUDA" : "Vulkan");
@@ -1900,10 +2079,10 @@ static void testT1DecodeKernel() {
 static void testGpuDecode(Profile prof, bool cuda) {
     std::vector<std::unique_ptr<Device>> devs;
 #ifdef GAIL_HAVE_CUDA
-    if (cuda) devs = createCudaDevices({}, stderrLogger(false));
+    if (cuda) devs = testGpus(true, stderrLogger(false));
 #endif
 #ifdef GAIL_HAVE_VULKAN
-    if (!cuda) devs = createVulkanDevices({}, stderrLogger(false));
+    if (!cuda) devs = testGpus(false, stderrLogger(false));
 #endif
     devs.erase(std::remove_if(devs.begin(), devs.end(), [](const std::unique_ptr<Device>& d) { return !d->canDecode(); }), devs.end());
     if (devs.empty()) {
@@ -2033,6 +2212,9 @@ int main(int argc, char** argv) {
         fn();
     };
     run("pool", testThreadPool);
+#ifdef GAIL_TEST_PLUGINS
+    run("plugins", testCudaPlugins);
+#endif
     run("bitio", testBitIo);
     run("tagtree", testTagTree);
     run("progression", testProgression);
