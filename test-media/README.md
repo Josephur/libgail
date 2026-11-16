@@ -1,8 +1,8 @@
 # Test media
 
-This directory is not in the repository: the clips are large and not ours to
-redistribute. The tests and benchmarks that need real video look here and skip
-themselves when it is empty.
+Put test clips here. Only this README is in the repository: the clips are large and
+not ours to redistribute, so each checkout supplies its own. The tests and benchmarks
+that need real video look here and skip themselves when the clip is missing.
 
 * `real_4k_hdr_30s.mkv`: a 30-second 3840×2160 HDR10 clip (H.264, BT.2020 PQ,
   mastering peak 2000 cd/m²). It is used by the Y'CbCr tests in `gail-tests`, the
