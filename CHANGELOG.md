@@ -6,6 +6,30 @@ tagged `vX.Y.Z` and published with prebuilt archives on the
 release is binary compatible with the ones before it (see
 [docs/LIBRARY.md](docs/LIBRARY.md#compatibility)).
 
+## 1.1.1 — unreleased
+
+Fixes to the decoder. The header and the binary interface are unchanged.
+
+### Library
+
+* `gail_decoder_cancel()` while a `gail_decoder_decode()` had its frame on a device let
+  that call return `GAIL_OK` with the picture. It now waits for the device to finish
+  with the frame, as before, and returns `GAIL_ERROR_CANCELLED` without the picture.
+* A first codestream the decoder could not be set up from (damaged or unsupported) had
+  its image passed to `on_image` inside `gail_decoder_send()`, on the app's thread. Such
+  images now come from a decoder thread, in their place in the order, like all others.
+* A device failure in the middle of the stream (a lost GPU, a driver error) failed only
+  the frame it happened on, and later codestreams kept going to that device. It now
+  stops the decoder, as a failure while setting up does: `gail_decoder_error()` says
+  what happened, the frames queued before it fail with `GAIL_ERROR_FAILED` without going
+  to a device, and later sends and decodes return the failure. A damaged or unsupported
+  codestream still fails only its own frame.
+* `gail_decoder_send()` from inside `on_image` could hang with one frame in flight and
+  another codestream queued, and so could `gail_decoder_decode()` from inside
+  `on_image`. A send from the callback now never waits, and a decode from it runs on the
+  callback's own thread, on the device of the frame being delivered, which is idle
+  meanwhile.
+
 ## 1.1.0 — 2026-11-15
 
 A decoder. Everything the 1.0 header declared is unchanged. The encoder codes frames as
