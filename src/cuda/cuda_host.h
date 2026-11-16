@@ -24,6 +24,14 @@ struct CudaPluginSpec {
 // Volta) on the CUDA 12 plugin. No device is ever given to the other one.
 std::vector<CudaPluginSpec> cudaPluginSpecs();
 
+// Whether a build for these architectures has code a GPU of compute capability sm
+// (major * 10 + minor) can run. archs is a plugin's list, CMake's CUDA_ARCHITECTURES
+// joined by spaces: "NN" is machine code and PTX for NN, "NN-real" the machine code alone
+// and "NN-virtual" the PTX alone. Machine code runs on the same major version at the same
+// or a higher minor, PTX on NN and everything after it; code for an "NNa" architecture
+// runs on NN only, and "NNf" on its family (the same major version).
+bool cudaArchsRun(const std::string& archs, int sm);
+
 class CudaHost {
 public:
     // The host the library uses: the plugins next to the module this code is part of,
@@ -42,9 +50,12 @@ public:
     ~CudaHost();
 
     // The devices that can be used, each with the plugin that serves it. The first call
-    // starts the CUDA runtime of every plugin and loads its kernels on the devices it
-    // serves; later calls answer from that.
+    // starts the CUDA runtime of every plugin and asks it about the GPUs, which sets
+    // nothing up on them (no context, no device memory): a GPU is offered when its
+    // plugin has code for its architecture (cudaArchsRun). Later calls answer from that.
     std::vector<DeviceInfo> list();
+    // Sets the devices up. One whose kernels do not load (device_usable) is left out
+    // with a warning, and from then on is not listed and unusable() says why.
     std::vector<std::unique_ptr<Device>> create(const std::vector<int>& select, const Logger& log);
     // Why the device with this index is not in list(): "" when it is, or there is none.
     std::string unusable(int index);

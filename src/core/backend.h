@@ -132,9 +132,10 @@ std::vector<std::unique_ptr<Device>> createVulkanDevices(const std::vector<int>&
 std::vector<DeviceInfo> listVulkanDevices();
 #endif
 #ifdef GAIL_HAVE_CUDA
-// The CUDA devices that can be used: those a backend plugin is there for and whose
-// kernels load on the device (cuda/cuda_host.h). A GPU no plugin can run is in neither
-// list, so that "auto" goes on to Vulkan for it.
+// The CUDA devices that can be used: those a backend plugin is there for and has code
+// for (cuda/cuda_host.h). Listing goes by architecture and sets nothing up; creating a
+// device also loads the kernels there, and leaves out a device they do not load on. A
+// GPU no plugin can run is in neither list, so that "auto" goes on to Vulkan for it.
 std::vector<std::unique_ptr<Device>> createCudaDevices(const std::vector<int>& select, const Logger& log);
 std::vector<DeviceInfo> listCudaDevices();
 // Why the CUDA device with this index cannot be used: "" when it can, or there is none.

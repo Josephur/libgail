@@ -393,6 +393,7 @@ if(GAIL_BUILD_TESTS)
     gail_test_plugin(other_abi gail_cuda13 1)
     gail_test_plugin(declines gail_cuda12 2)
     gail_test_plugin(no_driver gail_cuda13 3)
+    gail_test_plugin(busy gail_cuda12 4)
     target_compile_definitions(gail-tests PRIVATE GAIL_TEST_PLUGINS=1)
   endif()
 

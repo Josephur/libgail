@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <sstream>
 #include <map>
 #include <new>
 #include <stdexcept>
@@ -272,6 +273,33 @@ struct CudaHost::Entry {
     std::string reason;  // why it cannot be used; "" when it can
 };
 
+bool cudaArchsRun(const std::string& archs, int sm) {
+    std::istringstream in(archs);
+    std::string a;
+    while (in >> a) {
+        size_t n = 0;
+        while (n < a.size() && std::isdigit((unsigned char)a[n])) ++n;
+        if (n == 0) continue;
+        const int built = std::stoi(a.substr(0, n));
+        std::string rest = a.substr(n);
+        char variant = 0;  // 'a': this architecture only, 'f': its family
+        if (!rest.empty() && (rest[0] == 'a' || rest[0] == 'f')) {
+            variant = rest[0];
+            rest = rest.substr(1);
+        }
+        const bool real = rest.empty() || rest == "-real", virt = rest.empty() || rest == "-virtual";
+        const bool sameMajor = sm / 10 == built / 10 && sm % 10 >= built % 10;
+        if (variant == 'a') {
+            if ((real || virt) && sm == built) return true;
+        } else if (variant == 'f') {
+            if ((real || virt) && sameMajor) return true;
+        } else if ((real && sameMajor) || (virt && sm >= built)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<CudaPluginSpec> cudaPluginSpecs() { return {{"gail_cuda13", 75, 1 << 30}, {"gail_cuda12", 0, 74}}; }
 
 std::string CudaHost::fileName(const std::string& plugin) {
@@ -455,8 +483,10 @@ void CudaHost::probe() {
             e.reason = "it needs " + name + ", whose CUDA runtime does not list it";
             continue;
         }
-        if (owner->api->device_usable(e.local) != GAIL_CUDA_OK) {
-            e.reason = std::string("skipped by ") + name + ": " + owner->api->last_error();
+        // By architecture alone: listing sets nothing up on the GPU. Whether the kernels
+        // really load there is found out when the device is created.
+        if (!cudaArchsRun(owner->api->archs, sm)) {
+            e.reason = "skipped by " + name + ": not built for this architecture";
             continue;
         }
         e.plugin = owner;
@@ -511,6 +541,23 @@ std::vector<std::unique_ptr<Device>> CudaHost::create(const std::vector<int>& se
     for (const auto& e : entries) {
         if (!e.plugin) continue;
         if (!select.empty() && std::find(select.begin(), select.end(), e.info.index) == select.end()) continue;
+        // The kernels must load on the device, as a launch would load them (or have the
+        // driver compile them from PTX). A device where they do not is set aside, with
+        // the reason, as listing sets aside one the plugin has no code for.
+        if (e.plugin->api->device_usable(e.local) != GAIL_CUDA_OK) {
+            const std::string reason = "skipped by " + e.plugin->spec.name + ": " + e.plugin->api->last_error();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (auto& f : entries_)
+                    if (f.info.index == e.info.index) {
+                        f.plugin = nullptr;
+                        f.info.plugin.clear();
+                        f.reason = reason;
+                    }
+            }
+            if (log) log(LogLevel::Warning, "cuda: device " + std::to_string(e.info.index) + " " + e.info.name + " (" + e.sm + ") " + reason);
+            continue;
+        }
         auto shared = std::make_shared<Shared>();
         shared->api = e.plugin->api;
         shared->log = log;

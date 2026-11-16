@@ -44,6 +44,10 @@ A decoder. Everything the 1.0 header declared is unchanged. The encoder codes fr
 * `GAIL_BACKEND_AUTO` no longer picks CUDA for a GPU the CUDA backend has no code for, and
   goes on to Vulkan when CUDA can run none of the GPUs. `GAIL_BACKEND_CUDA` asked for by
   name fails for such a GPU when the encoder is created, with the reason.
+* Listing devices goes by each GPU's architecture and sets nothing up on it: no CUDA
+  context and no device memory stays behind. The kernels are loaded when an encoder or
+  decoder sets a GPU up, and a GPU they do not load on (a full one, for instance) is left
+  out then, with the reason.
 * `gail-enc --list-devices` shows the plugin that serves each CUDA device, and
   `gail_version_string()` names the plugins loaded.
 * Build: `GAIL_CUDA13_ROOT` and `GAIL_CUDA12_ROOT` name the two toolkits, and

@@ -85,11 +85,15 @@ and newer the CUDA 13.4 plugin.
   plugins are loaded, and any GPU CUDA cannot use, with the reason.
   `gail_version_string()` names the plugins loaded, as in
   `1.1.0 (cuda vulkan cpu; gail_cuda13 gail_cuda12)`.
-* **Listing devices.** Before a GPU is offered as a CUDA device, its plugin loads its
-  kernels on it, which is what tells whether they can run there. So the first
-  `gail_enumerate_devices()` of a process that reaches CUDA takes about a tenth of a second
-  per NVIDIA GPU and leaves a CUDA context on each (about 130 MB of device memory); later
-  calls answer from that.
+* **Listing devices.** A GPU is offered as a CUDA device when its plugin holds machine
+  code for its compute capability (the same major version, the same or a lower minor), or
+  PTX for an earlier one. Listing goes by that alone and sets nothing up on the GPU:
+  `gail_enumerate_devices()` starts each plugin's CUDA runtime, which takes a few tens of
+  milliseconds the first time in a process, and leaves no device memory in use. Whether
+  the kernels really load on the GPU is found out when an encoder or decoder sets it up. A
+  GPU where they do not, such as one whose memory is full, is then left out with the
+  reason at `GAIL_LOG_WARNING`: `GAIL_BACKEND_AUTO` carries on with the other CUDA GPUs,
+  or with Vulkan when none is left, and `GAIL_BACKEND_CUDA` fails.
 * **Static library.** `libgail.a` cannot carry plugins, so it has one backend linked in:
   the CUDA 13 one when the build had both toolkits. It serves the GPUs that backend has
   code for.

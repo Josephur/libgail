@@ -153,7 +153,9 @@ struct GailCudaPlugin {
     int (*device_desc)(int index, GailCudaDeviceDesc* out);
     // Whether the plugin's kernels can run on the device. This loads them with the
     // device current, as a launch would, so it also covers code the driver has to
-    // compile from PTX. GAIL_CUDA_ERROR and the reason when they cannot.
+    // compile from PTX. GAIL_CUDA_ERROR and the reason when they cannot. It sets the
+    // device up (a CUDA context), so the library calls it when it creates a device,
+    // never when it only lists them.
     int (*device_usable)(int index);
 
     int (*device_create)(int index, GailCudaLog log, void* user, GailCudaDevice** out);

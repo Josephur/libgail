@@ -145,7 +145,8 @@ static void testCudaPlugins() {
         return;
     }
     const fs::path cuda13 = standIns / "cuda13", cuda12 = standIns / "cuda12", otherAbi = standIns / "other_abi",
-                   declines = standIns / "declines", noDriver = standIns / "no_driver", none = standIns;  // none: no plugin file in it
+                   declines = standIns / "declines", noDriver = standIns / "no_driver", busy = standIns / "busy",
+                   none = standIns;  // none: no plugin file in it
     auto listed = [](CudaHost& h) {
         std::string s;
         for (const auto& d : h.list()) s += (s.empty() ? "" : " | ") + std::to_string(d.index) + " " + d.name + " " + d.plugin;
@@ -235,6 +236,46 @@ static void testCudaPlugins() {
         CHECK(h.unusable(4) == "Test Ampere (sm_86) skipped: it needs gail_cuda13, whose CUDA runtime did not start: no NVIDIA driver",
               "no driver: Ampere: \"%s\"", h.unusable(4).c_str());
         CHECK(has(h.notes(), "gail_cuda13 cannot be used: no NVIDIA driver"), "no driver: notes");
+    }
+    {  // listing goes by architecture and sets nothing up; a GPU the kernels do not load on is found out when it is created
+        CudaHost h({cuda13, busy}, specs);
+        CHECK(listed(h) == "0 Test Ampere gail_cuda13 | 1 Test Maxwell gail_cuda12 | 2 Test Turing gail_cuda13 | 3 Test Volta gail_cuda12",
+              "busy: devices \"%s\"", listed(h).c_str());
+        CHECK(h.unusable(3).empty(), "busy: Volta ruled out by listing: \"%s\"", h.unusable(3).c_str());
+        said.clear();
+        warnings = 0;
+        const std::string all = made(h.create({}, log));
+        CHECK(all == "Test Ampere (CUDA) on gail_cuda13 | Test Maxwell (CUDA) on gail_cuda12 | Test Turing (CUDA) on gail_cuda13",
+              "busy: made \"%s\"", all.c_str());
+        CHECK(has(said, "cuda: device 3 Test Volta (sm_70) skipped by gail_cuda12: out of memory") && warnings == 1,
+              "busy: %zu lines logged, %d of them warnings", said.size(), warnings);
+        // from then on the device is reported as the ones listing rules out are
+        CHECK(h.unusable(3) == "Test Volta (sm_70) skipped by gail_cuda12: out of memory", "busy: Volta: \"%s\"", h.unusable(3).c_str());
+        CHECK(listed(h) == "0 Test Ampere gail_cuda13 | 1 Test Maxwell gail_cuda12 | 2 Test Turing gail_cuda13",
+              "busy: devices after creation \"%s\"", listed(h).c_str());
+        CHECK(has(h.notes(), "device 3 Test Volta (sm_70) skipped by gail_cuda12: out of memory"), "busy: notes");
+        CHECK(h.create({3}, log).empty(), "busy: the Volta GPU was made");
+    }
+    {  // which architectures a plugin's code runs on
+        struct Case {
+            const char* archs;
+            int sm;
+            bool runs;
+        };
+        const Case cases[] = {
+            {"75 86 89 120", 75, true},   {"75 86 89 120", 87, true},  {"75 86 89 120", 70, false},
+            {"50 52 60 61 70", 86, true},  // through the PTX for 7.0
+            {"50 52 60 61 70", 35, false}, {"86-real", 89, true},      {"86-real", 90, false},  {"86-real", 80, false},
+            {"61-real", 60, false},        {"86-virtual", 120, true},  {"86-virtual", 75, false}, {"90a", 90, true},
+            {"90a", 100, false},           {"100f", 103, true},        {"100f", 120, false},    {"", 86, false},
+        };
+        int bad = 0;
+        for (const auto& c : cases)
+            if (cudaArchsRun(c.archs, c.sm) != c.runs) {
+                ++bad;
+                std::printf("  archs \"%s\" on sm %d: %s\n", c.archs, c.sm, c.runs ? "not run" : "run");
+            }
+        CHECK(bad == 0, "%d architecture cases wrong", bad);
     }
     {  // the first directory that has a plugin's file is the one it comes from
         CudaHost h({otherAbi, cuda13}, specs);
