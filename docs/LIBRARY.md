@@ -274,6 +274,20 @@ carries:
 | The same, with uncommitted changes | `1.1.0+3.gabc1234.dirty` |
 | No git, such as a source archive | `1.1.0` |
 
+The COM marker's text is `GAIL`, the full version and, after a space, the kind of device that
+encoded that frame:
+
+| Encoded by | COM text |
+| --- | --- |
+| CPU backend | `GAIL 1.1.0` |
+| Vulkan | `GAIL 1.1.0 vulk` |
+| CUDA | `GAIL 1.1.0 cuda13.4`: the CUDA toolkit (major.minor) of the plugin that served the GPU, or of the backend a static library links in |
+
+The tag is per frame, so a run over several devices, or one that falls back to the CPU, labels
+each frame with the device that encoded it. The frame budget always allows for the longest tag
+(9 characters), so the tag never changes a frame's coded data: frames encoded from the same
+coefficients differ only in the COM marker.
+
 To release, run this on a clean tree. It updates `gail.h`, commits, and tags:
 
 ```bash
