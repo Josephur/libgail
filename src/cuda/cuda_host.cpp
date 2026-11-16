@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <system_error>
 
+#include "core/t2.h"
 #include "cuda/cuda_plugin.h"
 
 #ifdef _WIN32
@@ -37,6 +38,14 @@ namespace fs = std::filesystem;
 namespace {
 
 int smOf(const GailCudaDeviceDesc& d) { return d.smMajor * 10 + d.smMinor; }
+
+// "cuda13.4" for a plugin built with CUDA 13.4.92: the toolkit's major.minor.
+std::string cudaCodestreamTag(const char* toolkit) {
+    std::string v = toolkit ? toolkit : "";
+    const size_t dot = v.find('.');
+    if (dot != std::string::npos) v = v.substr(0, v.find('.', dot + 1));
+    return ("cuda" + v).substr(0, kMaxDeviceTagBytes);
+}
 
 std::string smName(const GailCudaDeviceDesc& d) { return "sm_" + std::to_string(d.smMajor) + std::to_string(d.smMinor); }
 
@@ -196,6 +205,7 @@ class PluginDevice : public Device {
 public:
     explicit PluginDevice(std::shared_ptr<Shared> shared) : shared_(std::move(shared)), api_(shared_->api), d_(shared_->device) {}
     std::string name() const override { return api_->device_name(d_); }
+    std::string codestreamTag() const override { return cudaCodestreamTag(api_->toolkit); }
     std::unique_ptr<EncoderSlot> createSlot(const FrameLayout& L, const EncodeSettings& s) override {
         const GailCudaLayout layout = toPlugin(L);
         const GailCudaEncodeSettings settings = toPlugin(s);

@@ -51,6 +51,7 @@ public:
     }
 
     std::string name() const override { return name_ + " (Vulkan)"; }
+    std::string codestreamTag() const override { return "vulk"; }
     const Logger& log() const { return log_; }
     std::unique_ptr<EncoderSlot> createSlot(const FrameLayout& L, const EncodeSettings& s) override;
     uint64_t slotBytes(const FrameLayout& L, const EncodeSettings& s) const override;

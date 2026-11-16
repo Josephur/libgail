@@ -172,6 +172,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
             Tier1Frame t1;
             std::vector<uint8_t> cs;
             std::vector<uint8_t> own;
+            const std::string tag = devices[ref->device]->codestreamTag();
             void* in = ref->slot->inputBuffer();
             if (!in) {
                 own.resize(frameBytes);
@@ -215,7 +216,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
                         rr = allocateRate(L, t1, o.limits);
                         st.recoded = true;
                     }
-                    buildCodestream(L, t1, rr.passes.data(), &cs, nullptr);
+                    buildCodestream(L, t1, rr.passes.data(), &cs, nullptr, tag);
                     st.rateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
                     st.bytes = cs.size();
                     st.lambda = std::min({rr.lambdaComp[0], rr.lambdaComp[1], rr.lambdaComp[2]});

@@ -123,7 +123,7 @@ void put32(std::vector<uint8_t>& v, uint32_t x) {
     put16(v, x & 0xFFFF);
 }
 
-void writeMainHeader(const FrameLayout& L, std::vector<uint8_t>& v, int ntp) {
+void writeMainHeader(const FrameLayout& L, std::vector<uint8_t>& v, int ntp, const std::string& comment) {
     const bool fourk = L.profile == Profile::Cinema4K;
     const int nres = L.numRes();
     put16(v, marker::SOC);
@@ -168,12 +168,10 @@ void writeMainHeader(const FrameLayout& L, std::vector<uint8_t>& v, int ntp) {
         const uint8_t e[2][7] = {{0, 0, 0, 1, (uint8_t)NL, 3, 4}, {(uint8_t)NL, 0, 0, 1, (uint8_t)(NL + 1), 3, 4}};
         for (auto& p : e) v.insert(v.end(), p, p + 7);
     }
-    const char* label = codestreamLabel();
-    const size_t labelLen = std::strlen(label);
     put16(v, marker::COM);
-    put16(v, (uint32_t)(4 + labelLen));
+    put16(v, (uint32_t)(4 + comment.size()));
     put16(v, 1);  // Rcom: Latin-1 text
-    v.insert(v.end(), label, label + labelLen);
+    v.insert(v.end(), comment.begin(), comment.end());
     put16(v, marker::TLM);  // TLM (lengths patched later); buildCodestream relies on it being last
     put16(v, 4 + 5 * ntp);
     v.push_back(0);     // Ztlm
@@ -191,14 +189,24 @@ const char* codestreamLabel() {
     return label.c_str();
 }
 
+std::string codestreamComment(const std::string& tag) {
+    if (tag.size() > kMaxDeviceTagBytes) throw std::logic_error("device tag \"" + tag + "\" is too long");
+    return tag.empty() ? std::string(codestreamLabel()) : codestreamLabel() + (" " + tag);
+}
+
 void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* passes, std::vector<uint8_t>* out,
-                     CodestreamSizes* sizes) {
+                     CodestreamSizes* sizes, const std::string& tag) {
     const bool fourk = L.profile == Profile::Cinema4K;
     const int ntp = fourk ? 6 : 3;
     PacketWriter pw{L, t1, passes, {}, {}};
 
+    // The sizes budget for the longest comment there can be, whichever device coded the
+    // frame; the codestream carries this frame's, which is `slack` bytes shorter.
+    const std::string comment = codestreamComment(tag);
+    const size_t longest = std::strlen(codestreamLabel()) + 1 + kMaxDeviceTagBytes;
+    const size_t slack = longest - comment.size();
     std::vector<uint8_t> hdr;
-    writeMainHeader(L, hdr, ntp);
+    writeMainHeader(L, hdr, ntp, comment);
     const size_t tlmPos = hdr.size() - 5 * ntp;
     if (out) {
         out->clear();
@@ -210,7 +218,7 @@ void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* 
     const int npoc = progressionVolumes(L, vols);
     CodestreamSizes sz;
     sz.numTileParts = ntp;
-    size_t total = hdr.size();
+    size_t total = hdr.size() + slack;
     for (int pi = 0; pi < npoc; ++pi) {
         for (int c = 0; c < kNumComps; ++c) {
             const int tp = pi * 3 + c;
@@ -241,7 +249,7 @@ void buildCodestream(const FrameLayout& L, const Tier1Frame& t1, const uint8_t* 
     total += 2;
     if (out) put16(*out, marker::EOC);
     sz.total = total;
-    if (out && out->size() != total) throw std::logic_error("codestream size mismatch");
+    if (out && out->size() + slack != total) throw std::logic_error("codestream size mismatch");
     if (sizes) *sizes = sz;
 }
 

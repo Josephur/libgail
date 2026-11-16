@@ -554,9 +554,14 @@ static void testGpu(Profile prof, bool cuda) {
                     tg.data.size());
         RateResult rr = allocateRate(L, tg, dciLimits(24));
         std::vector<uint8_t> cs;
-        buildCodestream(L, tg, rr.passes.data(), &cs, nullptr);
+        buildCodestream(L, tg, rr.passes.data(), &cs, nullptr, d->codestreamTag());
         CheckReport rep = checkDciCodestream(cs.data(), cs.size(), 24);
         CHECK(rep.ok, "GPU frame not compliant: %s", formatReport(rep, false).c_str());
+        const std::string tag = d->codestreamTag();
+        CHECK(cuda ? tag.rfind("cuda", 0) == 0 && tag.size() > 6 : tag == "vulk", "%s: device tag \"%s\"",
+              d->name().c_str(), tag.c_str());
+        CHECK(rep.comment == codestreamComment(tag), "GPU frame comment \"%s\"", rep.comment.c_str());
+        std::printf("  comment: %s\n", rep.comment.c_str());
         const std::string path = std::string("/tmp/gail_gpu_") + (prof == Profile::Cinema4K ? "4k" : "2k") + ".j2c";
         FILE* f = std::fopen(path.c_str(), "wb");
         if (f) {
@@ -1386,6 +1391,132 @@ static void testCheckerMalformed() {
         CHECK(!checkDciCodestream(buf.get(), n, 24).ok, "prefix of %zu bytes passed", n);
     }
     std::printf("  %zu malformed cases and %zu prefixes rejected\n", sizeof cases / sizeof cases[0] + 1, full.size() - 1);
+}
+
+// The codestream with the main header's COM segment taken out, and that segment's text.
+static std::vector<uint8_t> withoutComment(const std::vector<uint8_t>& cs, std::string* text = nullptr) {
+    size_t at = 2;  // past SOC
+    while (at + 4 <= cs.size() && cs[at] == 0xFF && cs[at + 1] != 0x90) {  // up to the first SOT
+        const size_t seg = 2 + ((size_t)cs[at + 2] << 8 | cs[at + 3]);
+        if (cs[at + 1] == 0x64) {
+            if (text && seg >= 6) text->assign((const char*)cs.data() + at + 6, seg - 6);
+            std::vector<uint8_t> out(cs.begin(), cs.begin() + (ptrdiff_t)at);
+            out.insert(out.end(), cs.begin() + (ptrdiff_t)(at + seg), cs.end());
+            return out;
+        }
+        at += seg;
+    }
+    return cs;
+}
+
+// A device that encodes on the CPU but says it is another kind, for the device tag.
+class TaggedCpuDevice : public Device {
+public:
+    explicit TaggedCpuDevice(std::string tag) : cpu_(createCpuDevice(0)), tag_(std::move(tag)) {}
+    std::string name() const override { return cpu_->name() + " tagged " + tag_; }
+    std::string codestreamTag() const override { return tag_; }
+    std::unique_ptr<EncoderSlot> createSlot(const FrameLayout& L, const EncodeSettings& s) override {
+        return cpu_->createSlot(L, s);
+    }
+
+private:
+    std::unique_ptr<Device> cpu_;
+    std::string tag_;
+};
+
+// The COM marker names the kind of device that encoded the frame, and the rate control
+// budgets for the longest name there is: at the DCI cap no tag takes a frame over the
+// limit, and the coded data is the same whichever tag is written.
+static void testCodestreamComment() {
+    CHECK(codestreamComment("") == codestreamLabel(), "the CPU's comment is not the label alone");
+    CHECK(codestreamComment("vulk") == std::string(codestreamLabel()) + " vulk", "Vulkan comment: %s",
+          codestreamComment("vulk").c_str());
+    bool threw = false;
+    try {
+        codestreamComment("cuda100.10");
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    CHECK(threw, "a tag longer than kMaxDeviceTagBytes was accepted");
+
+    const char* tags[] = {"", "vulk", "cuda12.9", "cuda99.99"};
+    for (Profile prof : {Profile::Cinema2K, Profile::Cinema4K}) {
+        int W, H;
+        containerSize(prof, Container::Flat, W, H);
+        const FrameLayout L = makeLayout(W, H, prof, 1.0);
+        // noise: more to code in every component than the cap allows
+        std::vector<uint16_t> rgb((size_t)W * H * 3);
+        std::mt19937 rng(7);
+        for (auto& v : rgb) v = (uint16_t)rng();
+        EncodeSettings es;
+        es.profile = prof;
+        es.width = W;
+        es.height = H;
+        es.input = openPatternSource(W, H, 1, 3)->format();
+        Tier1Frame t1;
+        createCpuDevice(0)->createSlot(L, es)->encode(rgb.data(), t1);
+        const RateLimits lim = dciLimits(24, 250);  // the DCI maximum
+        const RateResult rr = allocateRate(L, t1, lim);
+        // the rate control fills the frame to within a few percent of the cap
+        CHECK(rr.sizes.total <= lim.maxTotal && rr.sizes.total + lim.maxTotal / 25 >= lim.maxTotal,
+              "%s frame not at the cap: %zu of %zu bytes", profileName(prof), rr.sizes.total, lim.maxTotal);
+        std::vector<uint8_t> first;
+        for (const char* tag : tags) {
+            std::vector<uint8_t> cs;
+            buildCodestream(L, t1, rr.passes.data(), &cs, nullptr, tag);
+            // the space before the tag and the tag's unused bytes
+            const size_t unused = 1 + kMaxDeviceTagBytes - (*tag ? 1 + std::strlen(tag) : 0);
+            CHECK(cs.size() + unused == rr.sizes.total, "tag \"%s\": %zu bytes, budgeted %zu", tag, cs.size(),
+                  rr.sizes.total);
+            CHECK(cs.size() <= lim.maxTotal, "tag \"%s\": %zu bytes over the %zu limit", tag, cs.size(), lim.maxTotal);
+            CheckReport rep = checkDciCodestream(cs.data(), cs.size(), 24);
+            CHECK(rep.ok, "tag \"%s\": %s", tag, formatReport(rep, false).c_str());
+            CHECK(rep.comment == codestreamComment(tag), "comment \"%s\", wanted \"%s\"", rep.comment.c_str(),
+                  codestreamComment(tag).c_str());
+            std::string text;
+            const std::vector<uint8_t> coded = withoutComment(cs, &text);
+            CHECK(text == rep.comment && coded.size() + 6 + text.size() == cs.size(), "COM segment not found");
+            if (first.empty()) first = coded;
+            CHECK(coded == first, "tag \"%s\" changed the coded data", tag);
+            // and the decoder's parser takes it
+            StreamHeader h;
+            std::string err;
+            CHECK(parseCodestream(cs.data(), cs.size(), false, h, err), "tag \"%s\": decoder parse: %s", tag, err.c_str());
+        }
+        std::printf("  %s: %zu of %zu bytes with the longest tag, the same coded data with every tag\n",
+                    profileName(prof), rr.sizes.total, lim.maxTotal);
+    }
+
+    // the pipeline writes the tag of the device that encoded each frame
+    const int W = 1998, H = 1080;
+    const FrameLayout L = makeLayout(W, H, Profile::Cinema2K, 1.0);
+    EncodeSettings es;
+    es.width = W;
+    es.height = H;
+    auto src = openPatternSource(W, H, 6, 3);
+    es.input = src->format();
+    std::vector<std::unique_ptr<Device>> devs;
+    devs.push_back(std::make_unique<TaggedCpuDevice>("cuda99.99"));
+    devs.push_back(createCpuDevice(0));
+    PipelineOptions po;
+    po.slotsPerDevice = 1;
+    po.check = true;
+    po.fps = 24;
+    po.limits = dciLimits(24, 250);
+    int bad = 0, tagged = 0;
+    po.onFrame = [&](const FrameStats& st, const std::vector<uint8_t>& cs) {
+        const CheckReport rep = checkDciCodestream(cs.data(), cs.size(), 24);
+        const std::string want = codestreamComment(st.device == 0 ? "cuda99.99" : "");
+        tagged += st.device == 0;
+        if (!rep.ok || !st.compliant || rep.comment != want) {
+            ++bad;
+            std::printf("  frame %lld from device %d: \"%s\", wanted \"%s\"\n", st.index, st.device, rep.comment.c_str(),
+                        want.c_str());
+        }
+    };
+    const PipelineSummary sum = runPipeline(*src, devs, L, es, po);
+    CHECK(sum.frames == 6 && bad == 0, "pipeline: %lld frames, %d with the wrong comment", sum.frames, bad);
+    std::printf("  pipeline: %d of 6 frames tagged by their device\n", tagged);
 }
 
 // Frame budgets the codestream headers alone cannot meet: dciLimits() must not wrap around,
@@ -2241,6 +2372,7 @@ int main(int argc, char** argv) {
     run("cpus", testCpuCount);
     run("faults", testFaults);
     run("limits", testRateLimits);
+    run("comment", testCodestreamComment);
     run("checker", testCheckerMalformed);
     run("matrix", testSourceMatrix);
     run("sources", testSourceErrors);

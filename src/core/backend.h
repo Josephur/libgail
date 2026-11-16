@@ -75,6 +75,9 @@ class Device {
 public:
     virtual ~Device() = default;
     virtual std::string name() const = 0;
+    // What the frames this device encodes carry after the label in their COM marker, to
+    // say what kind of device it is (core/t2.h, codestreamComment()): "" for the CPU.
+    virtual std::string codestreamTag() const { return {}; }
     virtual std::unique_ptr<EncoderSlot> createSlot(const FrameLayout& layout, const EncodeSettings& s) = 0;
     // Decoding (core/decode_backend.h), for the backends that have it.
     virtual bool canDecode() const { return false; }
