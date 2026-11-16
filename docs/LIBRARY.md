@@ -473,6 +473,13 @@ decodes 4K several times faster than it plays; `num_devices = GAIL_ALL_DEVICES` 
   picture is decoded straight into it: no copy, which is how the FFmpeg decoder fills
   FFmpeg's frames. A buffer handed to `gail_decoder_send()` must stay valid until its image
   has been received, or `gail_decoder_flush()` or `gail_decoder_destroy()` has returned.
+* **Back-pressure:** the decoder holds only a few decoded pictures the app has not taken
+  yet, about two more than its frames in flight, so a slow consumer does not make it pile
+  up pictures in memory. In callback mode `gail_decoder_send()` blocks until `on_image`
+  has worked through them. In pull mode it returns `GAIL_EAGAIN` instead, having taken
+  nothing, once the next picture in order is ready: receive it, then send the same
+  codestream again (FFmpeg's send / receive rule). A send from inside `on_image` never
+  waits for the backlog.
 * **Reduced size:** `config.reduce = 1` decodes at half size, `2` at a quarter (rounded
   up), by leaving out wavelet levels: much less work, for previews or a 2K display of a 4K
   track.

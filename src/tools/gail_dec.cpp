@@ -222,8 +222,14 @@ int main(int argc, char** argv) {
             gail_packet pkt{};
             pkt.data = streams[i].data();
             pkt.size = streams[i].size();
-            status = gail_decoder_send(dec, &pkt, nullptr);
             gail_image img;
+            // GAIL_EAGAIN: the decoder holds as many decoded pictures as it will; take one
+            while ((status = gail_decoder_send(dec, &pkt, nullptr)) == GAIL_EAGAIN) {
+                status = gail_decoder_receive(dec, &img, 1);
+                if (status != GAIL_OK) break;
+                take(img);
+                gail_image_free(&img);
+            }
             while (status == GAIL_OK && gail_decoder_receive(dec, &img, 0) == GAIL_OK) {
                 take(img);
                 gail_image_free(&img);

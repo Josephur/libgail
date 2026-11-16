@@ -49,6 +49,8 @@ typedef struct LibGailDecContext {
     AVFifo *frames;       /* AVFrame* of the codestreams in flight, in send order */
     int capacity;         /* how many to keep in flight before waiting for one */
     int eof_sent;
+    int pending;          /* s->pkt was refused for now (GAIL_EAGAIN): send it again */
+    int full;             /* ... after receiving a picture, which is then waited for */
     int configured;       /* dimensions known from the first codestream */
 
     int backend;
@@ -201,6 +203,11 @@ static int send_packet(AVCodecContext *avctx, AVPacket *pkt)
     dest.data[0] = frame->data[0];
     dest.stride[0] = frame->linesize[0];
     ret = gail_decoder_send(s->dec, &gp, &dest); /* copies the codestream */
+    if (ret == GAIL_EAGAIN) {
+        /* as many pictures decoded as the library holds: receive one, then send this again */
+        av_frame_free(&frame);
+        return AVERROR(EAGAIN);
+    }
     if (ret != GAIL_OK) {
         av_frame_free(&frame);
         return gail_error(avctx, ret, "cannot send a codestream");
@@ -224,11 +231,12 @@ static int libgail_dec_receive_frame(AVCodecContext *avctx, AVFrame *out)
     for (;;) {
         gail_image img;
         /* wait for a picture once enough are in flight, or when no more input will come */
-        const int wait = s->eof_sent || av_fifo_can_read(s->frames) >= s->capacity;
+        const int wait = s->eof_sent || s->full || av_fifo_can_read(s->frames) >= s->capacity;
 
         ret = gail_decoder_receive(s->dec, &img, wait);
         if (ret == GAIL_OK) {
             AVFrame *frame = NULL;
+            s->full = 0;
             av_fifo_read(s->frames, &frame, 1); /* pictures arrive in send order */
             if (img.status != GAIL_OK) {
                 ret = gail_error(avctx, img.status, "cannot decode a codestream");
@@ -244,15 +252,22 @@ static int libgail_dec_receive_frame(AVCodecContext *avctx, AVFrame *out)
         if (ret != GAIL_EAGAIN)
             return gail_error(avctx, ret, "decoding failed");
 
-        ret = ff_decode_get_packet(avctx, s->pkt);
-        if (ret == AVERROR_EOF) {
-            gail_decoder_send(s->dec, NULL, NULL);
-            s->eof_sent = 1;
+        if (!s->pending) {
+            ret = ff_decode_get_packet(avctx, s->pkt);
+            if (ret == AVERROR_EOF) {
+                gail_decoder_send(s->dec, NULL, NULL);
+                s->eof_sent = 1;
+                continue;
+            }
+            if (ret < 0)
+                return ret; /* EAGAIN: need more input */
+        }
+        ret = send_packet(avctx, s->pkt);
+        if (ret == AVERROR(EAGAIN)) {
+            s->pending = s->full = 1; /* kept in s->pkt; a picture is ready to be received */
             continue;
         }
-        if (ret < 0)
-            return ret; /* EAGAIN: need more input */
-        ret = send_packet(avctx, s->pkt);
+        s->pending = 0;
         av_packet_unref(s->pkt);
         if (ret < 0)
             return ret;
@@ -266,6 +281,8 @@ static void libgail_dec_flush(AVCodecContext *avctx)
     LibGailDecContext *s = avctx->priv_data;
     gail_decoder_flush(s->dec);
     drop_frames(s);
+    av_packet_unref(s->pkt);
+    s->pending = s->full = 0;
     s->eof_sent = 0;
 }
 

@@ -456,6 +456,29 @@ static double psnr_xyz(const uint8_t* img, ptrdiff_t stride, const uint16_t* src
     return se == 0 ? 99.0 : 10.0 * log10(4095.0 * 4095.0 * (double)w * h * 3 / se);
 }
 
+/* One image of the pull test: in order, the damaged frame 2 failed, frame 4 in our buffer. */
+static void dec_pull_check(const dec_set* s, gail_image* img, int got, const uint8_t* mine, ptrdiff_t stride) {
+    const int w = s->w, h = s->h;
+    CHECK(img->index == got && img->opaque == s->pkt[got].opaque, "pull: image %d arrived as %lld", got, (long long)img->index);
+    if (got == 2) {
+        CHECK(img->status == GAIL_ERROR_INVALID && !img->data[0] && strstr(gail_last_error(), "damaged"),
+              "pull: damaged frame came back with status %d (%s)", img->status, gail_last_error());
+    } else {
+        CHECK(img->status == GAIL_OK && img->data[0] && img->width == w && img->height == h, "pull: image %d: status %d", got,
+              img->status);
+        if (img->status == GAIL_OK)
+            CHECK(psnr_xyz((const uint8_t*)img->data[0], img->stride[0], s->src[got], w, h, 4) > 40, "pull: image %d is wrong", got);
+    }
+    if (got == 4) {
+        int touched = 0;
+        for (int y = 0; y < h; ++y)
+            for (int i = 0; i < 26; ++i) touched += mine[(size_t)y * stride + (size_t)w * 6 + i] != 0x5A;
+        CHECK(img->data[0] == mine && img->stride[0] == stride && touched == 0, "pull: caller's buffer: %d padding bytes written",
+              touched);
+    }
+    gail_image_free(img);
+}
+
 static int dec_cb_calls, dec_cb_bad;
 static void dec_on_image(void* user, const gail_image* img) {
     const dec_set* s = (const dec_set*)user;
@@ -469,6 +492,14 @@ static void dec_on_image(void* user, const gail_image* img) {
         for (int i = 0; i < rw * 3; ++i) dec_cb_bad += px[i] > 4095;
     }
     ++dec_cb_calls;
+}
+
+static volatile int dec_slow_calls;
+static void dec_on_image_slow(void* user, const gail_image* img) {
+    (void)user;
+    (void)img;
+    sleep_ms(20); /* a consumer slower than the decoder */
+    dec_slow_calls = dec_slow_calls + 1;
 }
 
 static int dec_log_fit;
@@ -673,6 +704,7 @@ static void test_decoder(void) {
         memset(mine, 0x5A, (size_t)stride * h);
         gail_image img;
         CHECK(gail_decoder_receive(d, &img, 0) == GAIL_EAGAIN, "receive before anything was sent");
+        int got = 0, r, refused = 0;
         for (int f = 0; f < DEC_FRAMES; ++f) {
             gail_packet p = s.pkt[f];
             gail_image dest;
@@ -682,32 +714,20 @@ static void test_decoder(void) {
                 dest.data[0] = mine;
                 dest.stride[0] = stride;
             }
-            CHECK(gail_decoder_send(d, &p, f == 4 ? &dest : NULL) == GAIL_OK, "send %d: %s", f, gail_last_error());
+            /* GAIL_EAGAIN: as many decoded images wait as the decoder holds; take one first */
+            while ((r = gail_decoder_send(d, &p, f == 4 ? &dest : NULL)) == GAIL_EAGAIN) {
+                ++refused;
+                const int rr = gail_decoder_receive(d, &img, 0);
+                CHECK(rr == GAIL_OK, "pull: send said receive first, but receive says %s", gail_status_string(rr));
+                if (rr != GAIL_OK) break;
+                dec_pull_check(&s, &img, got++, mine, stride);
+            }
+            CHECK(r == GAIL_OK, "send %d: %s", f, gail_last_error());
         }
         CHECK(gail_decoder_send(d, NULL, NULL) == GAIL_OK, "end of stream");
         CHECK(gail_decoder_send(d, &s.pkt[0], NULL) == GAIL_ERROR_STATE, "send after the end of the stream accepted");
-        int got = 0, r;
-        while ((r = gail_decoder_receive(d, &img, 1)) == GAIL_OK) {
-            CHECK(img.index == got && img.opaque == s.pkt[got].opaque, "pull: image %d arrived as %lld", got, (long long)img.index);
-            if (got == 2) {
-                CHECK(img.status == GAIL_ERROR_INVALID && !img.data[0] && strstr(gail_last_error(), "damaged"),
-                      "pull: damaged frame came back with status %d (%s)", img.status, gail_last_error());
-            } else {
-                CHECK(img.status == GAIL_OK && img.data[0] && img.width == w && img.height == h, "pull: image %d: status %d", got,
-                      img.status);
-                if (img.status == GAIL_OK)
-                    CHECK(psnr_xyz((const uint8_t*)img.data[0], img.stride[0], s.src[got], w, h, 4) > 40, "pull: image %d is wrong", got);
-            }
-            if (got == 4) {
-                int touched = 0;
-                for (int y = 0; y < h; ++y)
-                    for (int i = 0; i < 26; ++i) touched += mine[(size_t)y * stride + (size_t)w * 6 + i] != 0x5A;
-                CHECK(img.data[0] == mine && img.stride[0] == stride && touched == 0, "pull: caller's buffer: %d padding bytes written",
-                      touched);
-            }
-            gail_image_free(&img);
-            ++got;
-        }
+        while ((r = gail_decoder_receive(d, &img, 1)) == GAIL_OK) dec_pull_check(&s, &img, got++, mine, stride);
+        printf("  pull: %d sends refused until an image was received\n", refused);
         CHECK(r == GAIL_EOF && got == DEC_FRAMES, "pull: %d images, then %s", got, gail_status_string(r));
         CHECK(gail_decoder_finish(d) == GAIL_OK, "finish after the end");
         gail_decoder_destroy(d);
@@ -753,6 +773,57 @@ static void test_decoder(void) {
         CHECK(gail_decoder_receive(d, &img, 0) == GAIL_ERROR_STATE, "receive allowed in callback mode");
         CHECK(gail_decoder_finish(d) == GAIL_OK, "finish (callback): %s", gail_last_error());
         CHECK(dec_cb_calls == DEC_FRAMES && dec_cb_bad == 0, "callback: %d calls, %d wrong", dec_cb_calls, dec_cb_bad);
+        gail_decoder_destroy(d);
+    }
+
+    /* back-pressure, callback mode: a consumer slower than the decoder holds up send, so
+       the decoded pictures waiting for it stay few (with 2 frames in flight on one device:
+       2 queued, 2 decoding, about 4 decoded) instead of growing with the stream */
+    gail_decoder_config_defaults(&dc);
+    dc.frames_in_flight = 2;
+    dc.on_image = dec_on_image_slow;
+    d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK, "decoder create (slow callback): %s", gail_last_error());
+    if (d) {
+        dec_slow_calls = 0;
+        int worst = 0;
+        for (int f = 0; f < 24; ++f) {
+            gail_packet p = s.pkt[f % DEC_FRAMES];
+            CHECK(gail_decoder_send(d, &p, NULL) == GAIL_OK, "send %d (slow callback): %s", f, gail_last_error());
+            const int waiting = f + 1 - dec_slow_calls;
+            if (waiting > worst) worst = waiting;
+        }
+        CHECK(gail_decoder_finish(d) == GAIL_OK, "finish (slow callback): %s", gail_last_error());
+        printf("  slow callback: at most %d images sent and not yet delivered\n", worst);
+        CHECK(dec_slow_calls == 24 && worst <= 9, "slow callback: %d calls, up to %d images waiting", dec_slow_calls, worst);
+        gail_decoder_destroy(d);
+    }
+
+    /* back-pressure, pull mode: sending without receiving soon gets GAIL_EAGAIN, and the
+       codestream refused is not taken: it goes in again once an image has been received */
+    gail_decoder_config_defaults(&dc);
+    dc.frames_in_flight = 2;
+    d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK, "decoder create (backlog): %s", gail_last_error());
+    if (d) {
+        int accepted = 0, r = GAIL_OK;
+        while (accepted < 40 && (r = gail_decoder_send(d, &s.pkt[accepted % DEC_FRAMES], NULL)) == GAIL_OK) ++accepted;
+        CHECK(r == GAIL_EAGAIN && accepted <= 9, "pull backlog: %d codestreams taken, then %s", accepted, gail_status_string(r));
+        gail_image img;
+        CHECK(gail_decoder_receive(d, &img, 0) == GAIL_OK && img.index == 0, "pull backlog: no image ready after GAIL_EAGAIN");
+        gail_image_free(&img);
+        CHECK(gail_decoder_send(d, &s.pkt[accepted % DEC_FRAMES], NULL) == GAIL_OK, "pull backlog: send after a receive: %s",
+              gail_last_error());
+        ++accepted;
+        CHECK(gail_decoder_send(d, NULL, NULL) == GAIL_OK, "end of stream (backlog)");
+        int got = 1;
+        while ((r = gail_decoder_receive(d, &img, 1)) == GAIL_OK) {
+            CHECK(img.index == got && img.status == GAIL_OK && img.opaque == s.pkt[got % DEC_FRAMES].opaque,
+                  "pull backlog: image %d arrived as %lld, status %d", got, (long long)img.index, img.status);
+            gail_image_free(&img);
+            ++got;
+        }
+        CHECK(r == GAIL_EOF && got == accepted, "pull backlog: %d of %d images, then %s", got, accepted, gail_status_string(r));
         gail_decoder_destroy(d);
     }
 

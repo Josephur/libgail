@@ -131,6 +131,10 @@ struct Job {
     }
 };
 
+// The decoder whose on_image callback this thread is in, if any: a send from the callback
+// must not wait for the backlog it is itself working off.
+thread_local const void* tlsDelivering = nullptr;
+
 }  // namespace
 
 struct gail_decoder {
@@ -165,6 +169,12 @@ struct gail_decoder {
     int outstanding = 0;    // ordered jobs of this epoch queued or being decoded
     int activeOrdered = 0;  // ordered jobs of any epoch being decoded
     bool delivering = false;  // an on_image call is under way
+
+    // Decoded pictures that wait for the app, gail_decoder_receive() or on_image: at most
+    // about this many before send waits (callback mode) or says GAIL_EAGAIN (pull mode), so
+    // that a slow consumer does not make the decoder hold an unbounded number of pictures.
+    size_t backlogLimit() const { return workers.size() + 2; }
+    size_t backlog() const { return ready.size() + (delivering ? 1 : 0); }
     bool ended = false, quit = false;
     std::atomic<bool> canceled{false};
     std::atomic<bool> failed{false};
@@ -357,7 +367,10 @@ struct gail_decoder {
             img.reserved[2] = img.reserved[3] = 0;  // valid during the call only: nothing for the app to release
             l.unlock();
             if (job->status != GAIL_OK) lastError() = job->error;
+            tlsDelivering = this;
             cfg.on_image(cfg.user, &img);
+            tlsDelivering = nullptr;
+            doneCv.notify_all();  // the backlog went down
             l.lock();
         }
         delivering = false;
@@ -559,8 +572,20 @@ int gail_decoder_send(gail_decoder* d, const gail_packet* pkt, const gail_image*
         }
         std::unique_lock<std::mutex> l(d->m);
         if (d->ended) return fail(GAIL_ERROR_STATE, "send after the end of the stream");
-        d->doneCv.wait(l, [&] { return d->canceled.load() || d->queue.size() < std::max<size_t>(d->workers.size(), 1); });
+        // Room in the queue, and in the backlog of decoded pictures. In callback mode the
+        // backlog goes down by itself, so this waits for it; in pull mode only the app can
+        // take pictures off it, so once the next one in order is there, this says so.
+        const bool pull = d->cfg.on_image == nullptr, fromCallback = tlsDelivering == d;
+        d->doneCv.wait(l, [&] {
+            if (d->canceled.load()) return true;
+            if (d->queue.size() >= std::max<size_t>(d->workers.size(), 1)) return false;
+            if (fromCallback || d->backlog() < d->backlogLimit()) return true;
+            return pull && d->ready.count(d->nextOut) != 0;
+        });
         if (d->canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
+        if (!fromCallback && d->backlog() >= d->backlogLimit())
+            return fail(GAIL_EAGAIN, std::to_string(d->ready.size()) +
+                                         " decoded images wait to be received: receive one, then send this codestream again");
         job->index = d->nextIndex++;
         job->epoch = d->epoch;
         ++d->outstanding;
@@ -591,6 +616,8 @@ int gail_decoder_receive(gail_decoder* d, gail_image* img, int wait) {
     d->ready.erase(d->nextOut++);
     d->fill(*img, *job);
     job->ownedDst = false;  // the app's now, through the image
+    l.unlock();
+    d->doneCv.notify_all();  // the backlog went down
     if (job->status != GAIL_OK) lastError() = job->error;
     return GAIL_OK;
 }

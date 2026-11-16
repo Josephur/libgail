@@ -85,7 +85,7 @@ extern "C" {
 
 typedef enum gail_status {
     GAIL_OK = 0,
-    GAIL_EAGAIN = 1,              /* receive: no packet ready yet */
+    GAIL_EAGAIN = 1,              /* receive: no packet ready yet; gail_decoder_send(): receive an image first */
     GAIL_EOF = 2,                 /* receive: the stream has ended and every packet was returned */
     GAIL_ERROR_INVALID = -1,      /* invalid argument or setting */
     GAIL_ERROR_UNSUPPORTED = -2,  /* backend, device or format not available */
@@ -482,7 +482,11 @@ GAIL_API const char* gail_decoder_devices(const gail_decoder* d);  /* "NVIDIA ..
 
 /* Hands over one codestream: pkt->data, pkt->size and pkt->opaque are read, and the data
    is copied before returning. Blocks while every device is busy and as many frames again
-   are waiting. dest may be NULL (the library allocates the image; release it with
+   are waiting. The decoder also holds only a few decoded images that the app has not
+   taken yet (about two more than the frames in flight): with on_image set, send then
+   blocks until the callback has worked through them; without it, send returns
+   GAIL_EAGAIN, having taken nothing, once the next image in order can be received:
+   receive it, then send the same codestream again. dest may be NULL (the library allocates the image; release it with
    gail_image_free()) or name the caller's buffer in dest->data[0] with its row length in
    dest->stride[0] (bytes; 0 = tightly packed, otherwise at least 6 x width; bytes of a row
    past the picture are not written): the image is then decoded straight into it, and the
