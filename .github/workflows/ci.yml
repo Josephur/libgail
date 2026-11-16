@@ -96,6 +96,13 @@ jobs:
           # the installed library finds the plugins installed next to it
           grep -q "(cuda vulkan cpu; gail_cuda13 gail_cuda12)" consumer.txt
 
+      - name: Run the installed gail-dec
+        run: |
+          # it links libgail.so and must find the one installed in lib/ by itself, through its
+          # RPATH: nothing here tells the dynamic loader where to look
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/gail/bin/gail-dec" --list-devices
+
       - uses: actions/upload-artifact@v7
         with:
           name: libgail-linux-x86_64
@@ -303,6 +310,12 @@ jobs:
           export PKG_CONFIG_PATH="$RUNNER_TEMP/gail/lib/pkgconfig"
           cc tests/test_api.c -o consumer $(pkg-config --cflags --libs gail) -Wl,-rpath,"$RUNNER_TEMP/gail/lib" -lm
           ./consumer
+
+      - name: Run the installed gail-dec
+        run: |
+          # the same for libgail.dylib, through @loader_path
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/gail/bin/gail-dec" --list-devices
 
       - uses: actions/upload-artifact@v7
         with:

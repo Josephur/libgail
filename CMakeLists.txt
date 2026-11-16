@@ -362,6 +362,14 @@ if(GAIL_BUILD_TOOLS)
   # the decoder's tool goes through the public API alone
   add_executable(gail-dec src/tools/gail_dec.cpp)
   target_link_libraries(gail-dec PRIVATE ${GAIL_LINK} Threads::Threads)
+  if(GAIL_BUILD_SHARED)
+    # installed, it finds the shared library it links in the lib/ next to its bin/
+    if(APPLE)
+      set_target_properties(gail-dec PROPERTIES INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+    elseif(UNIX)
+      set_target_properties(gail-dec PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+    endif()
+  endif()
 
   add_executable(gail-bench src/tools/gail_bench.cpp)
   target_link_libraries(gail-bench PRIVATE gail_io ${GAIL_TOOL_BACKEND_LIBS})
