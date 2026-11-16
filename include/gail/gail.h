@@ -65,8 +65,8 @@ extern "C" {
 #endif
 
 #define GAIL_VERSION_MAJOR 1
-#define GAIL_VERSION_MINOR 0
-#define GAIL_VERSION_PATCH 1
+#define GAIL_VERSION_MINOR 1
+#define GAIL_VERSION_PATCH 0
 #define GAIL_VERSION ((GAIL_VERSION_MAJOR << 16) | (GAIL_VERSION_MINOR << 8) | GAIL_VERSION_PATCH)
 
 /* ---- binary compatibility -----------------------------------------------------------
