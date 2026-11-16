@@ -157,6 +157,11 @@ static void testCudaPlugins() {
         for (const auto& d : devices) s += (s.empty() ? "" : " | ") + d->name();
         return s;
     };
+    auto joined = [](const std::vector<std::string>& lines) {
+        std::string s;
+        for (const auto& l : lines) s += (s.empty() ? "" : " / ") + l;
+        return s;
+    };
     auto has = [](const std::vector<std::string>& lines, const std::string& text) {
         return std::any_of(lines.begin(), lines.end(), [&](const std::string& l) { return l.find(text) != std::string::npos; });
     };
@@ -184,7 +189,7 @@ static void testCudaPlugins() {
     }
     {  // both plugins: each GPU on the one its architecture belongs to, whatever number that plugin has it under
         CudaHost h({cuda13, cuda12}, specs);
-        CHECK(h.loaded() == "gail_cuda13 gail_cuda12", "both: loaded \"%s\"", h.loaded().c_str());
+        CHECK(h.loaded() == "gail_cuda13 gail_cuda12", "both: loaded \"%s\"; notes: %s", h.loaded().c_str(), joined(h.notes()).c_str());
         const std::string want = "0 Test Ampere gail_cuda13 | 1 Test Maxwell gail_cuda12 | 2 Test Turing gail_cuda13 | 3 Test Volta gail_cuda12";
         CHECK(listed(h) == want, "both: devices \"%s\"", listed(h).c_str());
         CHECK(h.unusable(0).empty() && h.unusable(3).empty() && h.unusable(7).empty(), "both: a usable or absent device has a reason");
@@ -205,7 +210,7 @@ static void testCudaPlugins() {
     }
     {  // gail_cuda12 missing: Turing and newer still work, the older GPUs are not offered
         CudaHost h({cuda13}, specs);
-        CHECK(h.loaded() == "gail_cuda13", "only gail_cuda13: loaded \"%s\"", h.loaded().c_str());
+        CHECK(h.loaded() == "gail_cuda13", "only gail_cuda13: loaded \"%s\"; notes: %s", h.loaded().c_str(), joined(h.notes()).c_str());
         CHECK(listed(h) == "0 Test Ampere gail_cuda13 | 2 Test Turing gail_cuda13", "only gail_cuda13: devices \"%s\"", listed(h).c_str());
         CHECK(h.unusable(1) == "Test Maxwell (sm_52) skipped: it needs gail_cuda12, which is not loaded", "only gail_cuda13: Maxwell: \"%s\"",
               h.unusable(1).c_str());
@@ -231,7 +236,7 @@ static void testCudaPlugins() {
     }
     {  // a plugin whose CUDA runtime does not start (no driver, or too old a one): its GPUs are not offered, the other plugin's are
         CudaHost h({noDriver, cuda12}, specs);
-        CHECK(h.loaded() == "gail_cuda13 gail_cuda12", "no driver: loaded \"%s\"", h.loaded().c_str());
+        CHECK(h.loaded() == "gail_cuda13 gail_cuda12", "no driver: loaded \"%s\"; notes: %s", h.loaded().c_str(), joined(h.notes()).c_str());
         CHECK(listed(h) == "0 Test Maxwell gail_cuda12 | 2 Test Volta gail_cuda12", "no driver: devices \"%s\"", listed(h).c_str());
         CHECK(h.unusable(4) == "Test Ampere (sm_86) skipped: it needs gail_cuda13, whose CUDA runtime did not start: no NVIDIA driver",
               "no driver: Ampere: \"%s\"", h.unusable(4).c_str());

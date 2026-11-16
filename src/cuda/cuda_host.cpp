@@ -399,10 +399,14 @@ void CudaHost::load(const std::vector<fs::path>& dirs, const CudaPluginSpec& spe
         why = name + " is not next to the gail library";
     } else if (const EntryPoint entry = openPlugin(file, why)) {
         const GailCudaPlugin* api = entry(GAIL_CUDA_PLUGIN_ABI);
-        if (!api || api->abi != GAIL_CUDA_PLUGIN_ABI || api->size != sizeof(GailCudaPlugin) || api->layout != cudaPluginLayout())
+        if (!api || api->abi != GAIL_CUDA_PLUGIN_ABI)
             why = "it was built for another version of the gail library (plugin interface " +
                   (api ? std::to_string(api->abi) : std::string("unknown")) + ", this library has " +
                   std::to_string(GAIL_CUDA_PLUGIN_ABI) + ")";
+        else if (api->size != sizeof(GailCudaPlugin) || api->layout != cudaPluginLayout())
+            why = "it was built for another version of the gail library (its interface tables are " +
+                  std::to_string(api->size) + " bytes, layout " + std::to_string(api->layout) + "; this library's are " +
+                  std::to_string(sizeof(GailCudaPlugin)) + " bytes, layout " + std::to_string(cudaPluginLayout()) + ")";
         else
             p->api = api;
     }
