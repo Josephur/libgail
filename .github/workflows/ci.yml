@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Builds libgail and runs its tests on every push and pull request:
-#   linux          GCC, CUDA + Vulkan + CPU backends, tests, install + pkg-config consumer
+#   linux          GCC, CUDA (both plugins) + Vulkan + CPU backends, tests, install + pkg-config consumer
 #   sanitize       GCC with AddressSanitizer and UndefinedBehaviorSanitizer, CPU backend: the decoder's
 #                  tests (it reads untrusted codestreams, damaged ones among them) and the API test
-#   windows-msvc   MSVC, CUDA + Vulkan + CPU backends, tests
+#   windows-msvc   MSVC, CUDA (both plugins) + Vulkan + CPU backends, tests
 #   windows-mingw  MinGW-w64 cross-build from Linux (Vulkan + CPU), tests under Wine
 #   macos          Apple clang, CPU backend only, tests, install + pkg-config consumer
 #   ffmpeg         FFmpeg built with the libgail encoder and decoder: a test pattern encoded,
@@ -12,7 +12,9 @@
 #   release        on v* tags only, after everything else passes: packages the four builds as archives
 #                  with SHA256SUMS and attaches them to a DRAFT GitHub release for review
 # GitHub's runners have no GPU: the CUDA and Vulkan backends are compiled everywhere, the
-# tests run on the CPU backend (GPU tests skip themselves).
+# tests run on the CPU backend (GPU tests skip themselves). The CUDA backend is two plugins,
+# gail_cuda13 built with CUDA 13 and gail_cuda12 built with CUDA 12; the jobs that build them
+# check that both are there and that the library loads both.
 name: CI
 
 on:
@@ -25,7 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CUDA_MANIFEST: "13.4.3"           # NVIDIA redistrib_<version>.json: CUDA 13.4.92
+  CUDA13_MANIFEST: "13.4.3"         # NVIDIA redistrib_<version>.json: CUDA 13.4.92, for gail_cuda13
+  CUDA12_MANIFEST: "12.9.2"         # CUDA 12.9.86, for gail_cuda12 (Maxwell, Pascal, Volta)
   VULKAN_SDK_VERSION: "1.4.363.0"
   FFMPEG_VERSION: "n9.0.2"
 
@@ -53,18 +56,22 @@ jobs:
         id: cuda-cache
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/cuda
-          key: cuda-linux-${{ env.CUDA_MANIFEST }}-${{ hashFiles('ci/fetch_cuda.py') }}
+          path: |
+            ${{ runner.temp }}/cuda13
+            ${{ runner.temp }}/cuda12
+          key: cuda-linux-${{ env.CUDA13_MANIFEST }}-${{ env.CUDA12_MANIFEST }}-${{ hashFiles('ci/fetch_cuda.py') }}
 
       - name: Fetch CUDA
         if: steps.cuda-cache.outputs.cache-hit != 'true'
-        run: python3 ci/fetch_cuda.py "$RUNNER_TEMP/cuda" --manifest "$CUDA_MANIFEST"
+        run: |
+          python3 ci/fetch_cuda.py "$RUNNER_TEMP/cuda13" --manifest "$CUDA13_MANIFEST"
+          python3 ci/fetch_cuda.py "$RUNNER_TEMP/cuda12" --manifest "$CUDA12_MANIFEST"
 
       - name: Configure
         run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DGAIL_ENABLE_CUDA=ON -DCMAKE_CUDA_COMPILER="$RUNNER_TEMP/cuda/bin/nvcc"
-          -DCUDAToolkit_ROOT="$RUNNER_TEMP/cuda" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gail"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAIL_ENABLE_CUDA=ON
+          -DGAIL_CUDA13_ROOT="$RUNNER_TEMP/cuda13" -DGAIL_CUDA12_ROOT="$RUNNER_TEMP/cuda12"
+          -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gail"
 
       - name: Build
         run: cmake --build build
@@ -72,17 +79,34 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      - name: Check that both CUDA plugins load
+        run: |
+          # no GPU here: a plugin that loads says so, then that its CUDA runtime cannot start
+          ./build/gail-enc --list-devices | tee devices.txt
+          grep -q "gail_cuda13 loaded" devices.txt
+          grep -q "gail_cuda12 loaded" devices.txt
+
       - name: Install and build a consumer with pkg-config
         run: |
           cmake --install build
+          ls -l "$RUNNER_TEMP/gail/lib/libgail_cuda13.so" "$RUNNER_TEMP/gail/lib/libgail_cuda12.so"
           export PKG_CONFIG_PATH="$RUNNER_TEMP/gail/lib/pkgconfig"
           cc tests/test_api.c -o consumer $(pkg-config --cflags --libs gail) -Wl,-rpath,"$RUNNER_TEMP/gail/lib" -lpthread -lm
-          ./consumer
+          ./consumer | tee consumer.txt
+          # the installed library finds the plugins installed next to it
+          grep -q "(cuda vulkan cpu; gail_cuda13 gail_cuda12)" consumer.txt
 
       - uses: actions/upload-artifact@v7
         with:
           name: libgail-linux-x86_64
           path: ${{ runner.temp }}/gail
+
+      # For the checks that need a GPU, which the runners do not have: gail-tests, to put in
+      # bin/ of the tree above and run on a machine with the GPUs in question.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tests-linux-x86_64
+          path: build/gail-tests
 
   sanitize:
     runs-on: ubuntu-24.04
@@ -126,12 +150,18 @@ jobs:
         id: cuda-cache
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}\cuda
-          key: cuda-windows-${{ env.CUDA_MANIFEST }}-${{ hashFiles('ci/fetch_cuda.py') }}
+          path: |
+            ${{ runner.temp }}\cuda13
+            ${{ runner.temp }}\cuda12
+          key: cuda-windows-${{ env.CUDA13_MANIFEST }}-${{ env.CUDA12_MANIFEST }}-${{ hashFiles('ci/fetch_cuda.py') }}
 
       - name: Fetch CUDA
         if: steps.cuda-cache.outputs.cache-hit != 'true'
-        run: python ci/fetch_cuda.py "$env:RUNNER_TEMP\cuda" --manifest $env:CUDA_MANIFEST
+        run: |
+          python ci/fetch_cuda.py "$env:RUNNER_TEMP\cuda13" --manifest $env:CUDA13_MANIFEST
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python ci/fetch_cuda.py "$env:RUNNER_TEMP\cuda12" --manifest $env:CUDA12_MANIFEST
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Cache Vulkan SDK
         id: vulkan-cache
@@ -155,9 +185,10 @@ jobs:
         run: |
           $env:VULKAN_SDK = "C:\VulkanSDK"
           $env:PATH = "C:\VulkanSDK\Bin;" + $env:PATH
-          $cuda = "$env:RUNNER_TEMP\cuda" -replace '\\', '/'
+          $cuda13 = "$env:RUNNER_TEMP\cuda13" -replace '\\', '/'
+          $cuda12 = "$env:RUNNER_TEMP\cuda12" -replace '\\', '/'
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAIL_ENABLE_CUDA=ON `
-            -DCMAKE_CUDA_COMPILER="$cuda/bin/nvcc.exe" -DCUDAToolkit_ROOT="$cuda" `
+            -DGAIL_CUDA13_ROOT="$cuda13" -DGAIL_CUDA12_ROOT="$cuda12" `
             -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP\gail"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
@@ -172,13 +203,35 @@ jobs:
           ctest --test-dir build --output-on-failure
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
+      - name: Check that both CUDA plugins load
+        run: |
+          # no GPU here: a plugin that loads says so, then that its CUDA runtime cannot start
+          .\build\gail-enc.exe --list-devices | Tee-Object devices.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($plugin in "gail_cuda13", "gail_cuda12") {
+            if (-not (Select-String -Quiet -SimpleMatch "$plugin loaded" devices.txt)) { throw "$plugin did not load" }
+          }
+
       - name: Install
-        run: cmake --install build
+        run: |
+          cmake --install build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # the plugins go next to gail.dll
+          foreach ($file in "gail.dll", "gail_cuda13.dll", "gail_cuda12.dll") {
+            if (-not (Test-Path "$env:RUNNER_TEMP\gail\bin\$file")) { throw "bin\$file was not installed" }
+          }
 
       - uses: actions/upload-artifact@v7
         with:
           name: libgail-windows-x64-msvc
           path: ${{ runner.temp }}\gail
+
+      # For the checks that need a GPU, which the runners do not have: gail-tests.exe, to put
+      # next to gail.dll in bin\ of the tree above and run on a machine with the GPUs in question.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tests-windows-x64-msvc
+          path: build\gail-tests.exe
 
   windows-mingw:
     runs-on: ubuntu-24.04
