@@ -501,7 +501,10 @@ GPU that no CUDA plugin has code for leaves the decoder on CUDA with the next on
   only set when a device fails; the decoder then stops, and every later send or decode
   returns that failure.
 * **Seeking:** `gail_decoder_flush()` drops what was sent and not yet received.
-  `gail_decoder_cancel()` stops everything at once.
+  `gail_decoder_cancel()` stops everything at once: calls that are waiting return
+  `GAIL_ERROR_CANCELLED`. A `gail_decoder_decode()` whose frame is on a device by then
+  waits for the device to finish with it (it may be writing into the caller's buffer)
+  and returns `GAIL_ERROR_CANCELLED` too, without the picture.
 * **Device memory:** a frame in flight takes about 0.26 GB (4K) or 0.07 GB (2K) on a GPU.
   A device that cannot hold the requested number runs fewer, with a warning.
 * **Agreement between backends:** the CUDA and Vulkan decoders reproduce the CPU decoder's

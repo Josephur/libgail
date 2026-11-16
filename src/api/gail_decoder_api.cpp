@@ -665,8 +665,10 @@ int gail_decoder_decode(gail_decoder* d, const gail_packet* pkt, gail_image* img
         d->workCv.notify_one();
         // Once queued the job may be writing to the caller's buffer, so this waits for it
         // even when the decoder is canceled meanwhile (a canceled decoder drops what is
-        // still queued, and marks it done)
+        // still queued, and marks it done). A frame that was under way when the cancel
+        // came is not handed out either: the call was blocked, so it says canceled.
         d->doneCv.wait(l, [&] { return job->done; });
+        if (d->canceled.load()) job->failWith(GAIL_ERROR_CANCELLED, "canceled");
         l.unlock();
         d->fill(*img, *job);
         job->ownedDst = false;

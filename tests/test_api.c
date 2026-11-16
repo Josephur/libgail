@@ -527,6 +527,73 @@ static thread_ret THREAD_FN dec_worker(void* arg) {
     return 0;
 }
 
+/* ---- decoder: the threading contracts of gail.h, on the CPU backend ---------------------- */
+
+static gail_decoder* dec_cpu(gail_image_cb on_image, void* user) {
+    gail_decoder_config dc;
+    gail_decoder_config_defaults(&dc);
+    dc.backend = GAIL_BACKEND_CPU;
+    dc.cpu_threads = 1; /* slow enough to be caught in the middle of a frame */
+    dc.frames_in_flight = 1;
+    dc.on_image = on_image;
+    dc.user = user;
+    gail_decoder* d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK && d, "CPU decoder create: %s", gail_last_error());
+    return d;
+}
+
+/* A blocking decode on another thread, for gail_decoder_cancel() to catch under way. */
+typedef struct dec_blocked {
+    gail_decoder* d;
+    const gail_packet* pkt;
+    gail_image img;
+    int result;
+    double returned; /* now_ms() when the call came back */
+} dec_blocked;
+static thread_ret THREAD_FN dec_blocked_run(void* arg) {
+    dec_blocked* b = (dec_blocked*)arg;
+    memset(&b->img, 0, sizeof b->img);
+    b->result = gail_decoder_decode(b->d, b->pkt, &b->img);
+    b->returned = now_ms();
+    return 0;
+}
+
+static void test_decoder_contracts(const dec_set* s) {
+    /* A cancel while a blocking decode is under way: the call waits for the frame (it may
+       be writing into the caller's buffer), then returns GAIL_ERROR_CANCELLED, not the
+       picture */
+    {
+        gail_decoder* d = dec_cpu(NULL, NULL);
+        if (d) {
+            gail_image img;
+            memset(&img, 0, sizeof img);
+            const double t0 = now_ms();
+            CHECK(gail_decoder_decode(d, &s->pkt[0], &img) == GAIL_OK, "CPU decode: %s", gail_last_error());
+            const double took = now_ms() - t0;
+            gail_image_free(&img);
+            dec_blocked b;
+            b.d = d;
+            b.pkt = &s->pkt[1];
+            thread_t t;
+            thread_start(&t, dec_blocked_run, &b);
+            sleep_ms((int)(took / 3) + 2);
+            const double canceled = now_ms();
+            gail_decoder_cancel(d);
+            thread_join(t);
+            if (b.returned < canceled) {
+                printf("  note: the decode was over before the cancel (%.0f ms a frame)\n", took);
+            } else {
+                CHECK(b.result == GAIL_ERROR_CANCELLED && !b.img.data[0] && b.img.status == GAIL_ERROR_CANCELLED,
+                      "cancel during a blocking decode: it returned %s with %s picture", gail_status_string(b.result),
+                      b.img.data[0] ? "a" : "no");
+            }
+            gail_image_free(&b.img);
+            gail_decoder_destroy(d);
+        }
+    }
+
+}
+
 static void test_decoder(void) {
     dec_set s;
     memset(&s, 0, sizeof s);
@@ -909,6 +976,8 @@ static void test_decoder(void) {
     CHECK(gail_decoder_create(&newer.c, &d) == GAIL_ERROR_UNSUPPORTED && !d, "newer header, a setting we lack accepted");
     printf("  sizes: decoder_config %zu, image %zu, stream_info %zu\n", sizeof(gail_decoder_config), sizeof(gail_image),
            sizeof(gail_stream_info));
+
+    test_decoder_contracts(&s);
 
     free(frame0);
     for (int f = 0; f < DEC_FRAMES; ++f) {

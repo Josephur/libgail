@@ -523,7 +523,9 @@ GAIL_API int gail_decoder_finish(gail_decoder* d);
 
 /* Stops decoding as soon as possible. Returns at once and may be called from any thread,
    including the callbacks. Frames not yet delivered are dropped; blocked and later calls
-   return GAIL_ERROR_CANCELLED. */
+   return GAIL_ERROR_CANCELLED. A gail_decoder_decode() whose frame is being decoded
+   returns it once the device is done with that frame (until then it may still be writing
+   into the caller's buffer), with no picture. */
 GAIL_API void gail_decoder_cancel(gail_decoder* d);
 
 /* NULL while all is well, else what stopped the decoder (a device failure; a frame that
