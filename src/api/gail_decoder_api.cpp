@@ -19,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -401,7 +402,13 @@ struct gail_decoder {
                     deliver(l);
                 } else if (cfg.on_image) {
                     courierDue = wake = true;
-                    if (!courier.joinable()) courier = std::thread([this] { runCourier(); });
+                    try {
+                        if (!courier.joinable()) courier = std::thread([this] { runCourier(); });
+                    } catch (const std::system_error&) {
+                        // No thread to be had: passed on here rather than never
+                        wake = false;
+                        deliver(l);
+                    }
                 }
             }
         }
