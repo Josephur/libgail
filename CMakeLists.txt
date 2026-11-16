@@ -378,8 +378,11 @@ endif()
 # ---- tests -------------------------------------------------------------------------------
 if(GAIL_BUILD_TESTS)
   enable_testing()
-  add_executable(gail-tests tests/test_main.cpp)
+  # with the library's own sources, for the tests that reach into the API's internals
+  add_executable(gail-tests tests/test_main.cpp ${GAIL_API_SOURCES})
   target_link_libraries(gail-tests PRIVATE gail_io ${GAIL_TOOL_BACKEND_LIBS})
+  target_include_directories(gail-tests PRIVATE include)
+  target_compile_definitions(gail-tests PRIVATE GAIL_STATIC)
   add_test(NAME gail-tests COMMAND gail-tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
   if(TARGET gail_cuda_host)

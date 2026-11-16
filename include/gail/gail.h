@@ -489,7 +489,8 @@ GAIL_API const char* gail_decoder_devices(const gail_decoder* d);  /* "NVIDIA ..
    taken yet (about two more than the frames in flight): with on_image set, send then
    blocks until the callback has worked through them; without it, send returns
    GAIL_EAGAIN, having taken nothing, once the next image in order can be received:
-   receive it, then send the same codestream again. dest may be NULL (the library allocates the image; release it with
+   receive it, then send the same codestream again. A send from inside on_image never
+   blocks: the codestream is queued at once. dest may be NULL (the library allocates the image; release it with
    gail_image_free()) or name the caller's buffer in dest->data[0] with its row length in
    dest->stride[0] (bytes; 0 = tightly packed, otherwise at least 6 x width; bytes of a row
    past the picture are not written; dest->width and dest->height, when not 0, must be the
@@ -510,7 +511,8 @@ GAIL_API int gail_decoder_receive(gail_decoder* d, gail_image* img, int wait);
    are decoded concurrently. On entry img must be zeroed, or name the caller's buffer in
    img->data[0] / img->stride[0] as for gail_decoder_send(). Returns the frame's status:
    a negative one leaves no picture. Frames decoded this way never appear in receive /
-   on_image. */
+   on_image. It may be called from inside on_image, even with one frame in flight (the
+   frame may then be decoded on the callback's own thread). */
 GAIL_API int gail_decoder_decode(gail_decoder* d, const gail_packet* pkt, gail_image* img);
 
 /* For a seek: drops every frame handed over with gail_decoder_send() and not yet
@@ -523,12 +525,16 @@ GAIL_API int gail_decoder_finish(gail_decoder* d);
 
 /* Stops decoding as soon as possible. Returns at once and may be called from any thread,
    including the callbacks. Frames not yet delivered are dropped; blocked and later calls
-   return GAIL_ERROR_CANCELLED. */
+   return GAIL_ERROR_CANCELLED. A gail_decoder_decode() whose frame is being decoded
+   returns it once the device is done with that frame (until then it may still be writing
+   into the caller's buffer), with no picture. */
 GAIL_API void gail_decoder_cancel(gail_decoder* d);
 
-/* NULL while all is well, else what stopped the decoder (a device failure; a frame that
-   cannot be decoded does not stop it). Once stopped, send and decode return that failure
-   and the decoder is not set up again: it needs to be destroyed. */
+/* NULL while all is well, else what stopped the decoder (a device failure, while setting
+   up or while decoding; a frame that cannot be decoded does not stop it). The frame the
+   device failed on, and every frame handed over before and not yet decoded, comes back
+   with GAIL_ERROR_FAILED. Once stopped, send and decode return that failure and the
+   decoder is not set up again: it needs to be destroyed. */
 GAIL_API const char* gail_decoder_error(const gail_decoder* d);
 
 #ifdef __cplusplus

@@ -19,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -131,11 +132,19 @@ struct Job {
     }
 };
 
-// The decoder whose on_image callback this thread is in, if any: a send from the callback
-// must not wait for the backlog it is itself working off.
+// The decoder whose on_image callback this thread is in, if any: a send or a decode from
+// the callback must not wait for work that only this thread may be there to do.
 thread_local const void* tlsDelivering = nullptr;
+// The decoder this thread is a worker of, and its gail_decoder::Worker.
+thread_local const void* tlsWorkerOf = nullptr;
+thread_local void* tlsWorker = nullptr;
 
 }  // namespace
+
+gail::DecoderDeviceHook& gail::decoderDeviceHook() {
+    static DecoderDeviceHook hook;
+    return hook;
+}
 
 struct gail_decoder {
     gail_decoder_config cfg{};
@@ -169,6 +178,12 @@ struct gail_decoder {
     int outstanding = 0;    // ordered jobs of this epoch queued or being decoded
     int activeOrdered = 0;  // ordered jobs of any epoch being decoded
     bool delivering = false;  // an on_image call is under way
+    // Callback mode: passes on images that no worker finished, those of codestreams the
+    // decoder could not be set up from (there may be no workers yet), so that on_image
+    // runs on a decoder thread and never inside gail_decoder_send(). Started when needed.
+    std::thread courier;
+    std::condition_variable courierCv;
+    bool courierDue = false;
 
     // Decoded pictures that wait for the app, gail_decoder_receive() or on_image: at most
     // about this many before send waits (callback mode) or says GAIL_EAGAIN (pull mode), so
@@ -191,24 +206,28 @@ struct gail_decoder {
         cfg.log(cfg.log_user, level, buf);
     }
 
+    // Stops the decoder for good (the first failure is the one kept). `error` is written
+    // before `failed` is set and never again, so gail_decoder_error() may read it unlocked.
     void setError(const std::string& what, int status = GAIL_ERROR_FAILED) {
         std::lock_guard<std::mutex> l(m);
-        if (failed.exchange(true)) return;
+        if (failed.load()) return;
         error = what;
         failStatus = status;
+        failed.store(true);
     }
 
     // First codestream: learn the picture's size and structure, make the frames in flight
     // and start their threads. Returns a status with the calling thread's last error set.
     int setUp(const uint8_t* data, size_t size) {
         std::lock_guard<std::mutex> l(setupMutex);
-        if (configured.load()) return GAIL_OK;
         if (failed.load()) {
-            // A device failed setting up: that stops the decoder, rather than letting a later
-            // codestream (perhaps of another size) set it up afresh
+            // A device failed, setting up or decoding: that stops the decoder. Nothing more
+            // goes to the devices, and it is not set up afresh from a later codestream
+            // (perhaps of another size).
             std::lock_guard<std::mutex> lm(m);
             return fail(failStatus, error);
         }
+        if (configured.load()) return GAIL_OK;
         StreamHeader h;
         std::string err;
         if (!parseCodestream(data, size, true, h, err)) return fail(GAIL_ERROR_INVALID, err);
@@ -277,6 +296,8 @@ struct gail_decoder {
 
     void run(Worker& w) {
         if (cfg.low_priority) lowerCurrentThreadPriority();
+        tlsWorkerOf = this;
+        tlsWorker = &w;
         for (;;) {
             std::shared_ptr<Job> job;
             {
@@ -289,17 +310,25 @@ struct gail_decoder {
             }
             doneCv.notify_all();  // room in the queue
             decodeOne(*job, w);
-            finished(job);
+            finished(job, true);
         }
     }
 
+    // What is wrong with a codestream fails only its own frame; what goes wrong on the
+    // device (other than running out of memory for this frame) stops the decoder.
     void decodeOne(Job& job, Worker& w) {
         job.device = w.device;
+        if (failed.load()) {  // queued before a device failed: it does not go to one
+            std::lock_guard<std::mutex> l(m);
+            return job.failWith(failStatus, error);
+        }
+        const uint8_t* data = job.cs.data();
+        const size_t size = job.cs.size();
+        const FrameLayout* L = layout.get();
+        std::optional<FrameLayout> own;
         try {
             StreamHeader h;
             std::string err;
-            const uint8_t* data = job.cs.data();
-            const size_t size = job.cs.size();
             if (!parseCodestream(data, size, false, h, err)) return job.failWith(GAIL_ERROR_INVALID, "damaged codestream: " + err);
             if (!h.supported) return job.failWith(GAIL_ERROR_UNSUPPORTED, "unsupported codestream: " + h.unsupported);
             if (h.width != first.width || h.height != first.height || h.levels != first.levels)
@@ -309,8 +338,6 @@ struct gail_decoder {
                                         std::to_string(first.width) + "x" + std::to_string(first.height) + " with " +
                                         std::to_string(first.levels) + ": use another decoder");
             // Step sizes usually stay the same for a whole track; a frame with its own gets its own layout
-            const FrameLayout* L = layout.get();
-            std::optional<FrameLayout> own;
             if (h.guardBits != first.guardBits || std::memcmp(h.eps, first.eps, sizeof h.eps) != 0 ||
                 std::memcmp(h.mu, first.mu, sizeof h.mu) != 0) {
                 own.emplace(layoutFor(h));
@@ -318,11 +345,28 @@ struct gail_decoder {
             }
             if (!parsePackets(data, h, *L, L->levels - ds.reduce, w.blocks, err))
                 return job.failWith(GAIL_ERROR_INVALID, "damaged codestream: " + err);
+            // What the slot would refuse for the codestream's sake is refused here, so that
+            // whatever the slot throws is the device's doing
+            if (!sameGeometry(*L, *layout) || (int)w.blocks.size() != layout->numCblks())
+                return job.failWith(GAIL_ERROR_UNSUPPORTED,
+                                    "unsupported codestream: its code-blocks differ from the first frame's: use another decoder");
+            if (size > 0xFFFFFFFFu) return job.failWith(GAIL_ERROR_UNSUPPORTED, "unsupported codestream: larger than 4 GiB");
+        } catch (const std::bad_alloc&) {
+            return job.failWith(GAIL_ERROR_NOMEM, "out of memory");
+        } catch (const std::exception& e) {
+            return job.failWith(GAIL_ERROR_UNSUPPORTED, std::string("unsupported codestream: ") + e.what());
+        }
+        try {
             w.slot->decode(*L, data, size, w.blocks, job.dst, job.stride, nullptr);
+        } catch (const DeviceOutOfMemory& e) {
+            job.failWith(GAIL_ERROR_NOMEM, devices[w.device]->name() + ": " + e.what());
         } catch (const std::bad_alloc&) {
             job.failWith(GAIL_ERROR_NOMEM, "out of memory");
         } catch (const std::exception& e) {
-            job.failWith(GAIL_ERROR_FAILED, e.what());
+            const std::string why = devices[w.device]->name() + ": " + e.what();
+            log(GAIL_LOG_ERROR, "%s: the decoder stops", why.c_str());
+            setError(why);
+            job.failWith(GAIL_ERROR_FAILED, why);
         }
     }
 
@@ -343,21 +387,48 @@ struct gail_decoder {
         }
     }
 
-    // A worker is done with a job (or it never needed one): hand it to its waiter, or put
-    // it in line for delivery in send order.
-    void finished(const std::shared_ptr<Job>& job, bool wasActive = true) {
+    // A worker is done with a job (fromWorker), or the job never needed one: hand it to
+    // its waiter, or put it in line for delivery in send order.
+    void finished(const std::shared_ptr<Job>& job, bool fromWorker) {
         std::unique_lock<std::mutex> l(m);
         job->done = true;
+        bool wake = false;
         if (job->ordered) {
-            if (wasActive) --activeOrdered;
+            if (fromWorker) --activeOrdered;
             if (job->epoch == epoch && !canceled.load()) {
                 --outstanding;
                 ready[job->index] = job;
-                if (cfg.on_image) deliver(l);
+                if (cfg.on_image && fromWorker) {
+                    deliver(l);
+                } else if (cfg.on_image) {
+                    courierDue = wake = true;
+                    try {
+                        if (!courier.joinable()) courier = std::thread([this] { runCourier(); });
+                    } catch (const std::system_error&) {
+                        // No thread to be had: passed on here rather than never
+                        wake = false;
+                        deliver(l);
+                    }
+                }
             }
         }
         l.unlock();
+        if (wake) courierCv.notify_one();
         doneCv.notify_all();
+    }
+
+    void runCourier() {
+        if (cfg.low_priority) lowerCurrentThreadPriority();
+        std::unique_lock<std::mutex> l(m);
+        for (;;) {
+            courierCv.wait(l, [&] { return quit || courierDue; });
+            if (quit) return;
+            courierDue = false;
+            deliver(l);
+            l.unlock();
+            doneCv.notify_all();  // delivering is over
+            l.lock();
+        }
     }
 
     // Callback mode: pass on every image whose turn has come. One thread at a time does
@@ -392,9 +463,11 @@ struct gail_decoder {
             queue.clear();
         }
         workCv.notify_all();
+        courierCv.notify_all();
         doneCv.notify_all();
         for (auto& w : workers)
             if (w->thread.joinable()) w->thread.join();
+        if (courier.joinable()) courier.join();
     }
 };
 
@@ -544,6 +617,7 @@ int gail_decoder_create(const gail_decoder_config* c, gail_decoder** decoder) {
             }
         }
         if (d->devices.empty()) throw ApiError(GAIL_ERROR_UNSUPPORTED, why);
+        if (decoderDeviceHook()) decoderDeviceHook()(d->devices);
         for (size_t i = 0; i < d->devices.size(); ++i) d->devicesDesc += (i ? ", " : "") + d->devices[i]->name();
         *decoder = d.release();
         return GAIL_OK;
@@ -598,10 +672,12 @@ int gail_decoder_send(gail_decoder* d, const gail_packet* pkt, const gail_image*
         // backlog goes down by itself, so this waits for it; in pull mode only the app can
         // take pictures off it, so once the next one in order is there, this says so.
         const bool pull = d->cfg.on_image == nullptr, fromCallback = tlsDelivering == d;
+        // A send from on_image does not wait at all: the thread it is on may be the only
+        // one that could make room (one frame in flight).
         d->doneCv.wait(l, [&] {
-            if (d->canceled.load()) return true;
+            if (d->canceled.load() || fromCallback) return true;
             if (d->queue.size() >= std::max<size_t>(d->workers.size(), 1)) return false;
-            if (fromCallback || d->backlog() < d->backlogLimit()) return true;
+            if (d->backlog() < d->backlogLimit()) return true;
             return pull && d->ready.count(d->nextOut) != 0;
         });
         if (d->canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
@@ -617,7 +693,7 @@ int gail_decoder_send(gail_decoder* d, const gail_packet* pkt, const gail_image*
             d->workCv.notify_one();
         } else {
             l.unlock();
-            d->finished(job, false);
+            d->finished(job, false);  // passed on by the courier, not on this thread
         }
         return GAIL_OK;
     } catch (const std::bad_alloc&) {
@@ -658,6 +734,19 @@ int gail_decoder_decode(gail_decoder* d, const gail_packet* pkt, gail_image* img
         if (int r = prepareDestination(d, *job, img)) return r;
         job->cs.assign(pkt->data, pkt->data + pkt->size);
         std::unique_lock<std::mutex> l(d->m);
+        if (tlsDelivering == d && tlsWorkerOf == d) {
+            // From on_image on one of the workers: its slot is idle, and it may be the only
+            // one (one frame in flight), so the frame is decoded here rather than queued for
+            // the thread that is waiting for it
+            job->index = d->nextBlocking++;
+            l.unlock();
+            d->decodeOne(*job, *static_cast<gail_decoder::Worker*>(tlsWorker));
+            if (d->canceled.load()) job->failWith(GAIL_ERROR_CANCELLED, "canceled");
+            d->fill(*img, *job);
+            job->ownedDst = false;
+            if (job->status != GAIL_OK) return fail(job->status, job->error);
+            return GAIL_OK;
+        }
         d->doneCv.wait(l, [&] { return d->canceled.load() || d->queue.size() < d->workers.size(); });
         if (d->canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
         job->index = d->nextBlocking++;
@@ -665,8 +754,10 @@ int gail_decoder_decode(gail_decoder* d, const gail_packet* pkt, gail_image* img
         d->workCv.notify_one();
         // Once queued the job may be writing to the caller's buffer, so this waits for it
         // even when the decoder is canceled meanwhile (a canceled decoder drops what is
-        // still queued, and marks it done)
+        // still queued, and marks it done). A frame that was under way when the cancel
+        // came is not handed out either: the call was blocked, so it says canceled.
         d->doneCv.wait(l, [&] { return job->done; });
+        if (d->canceled.load()) job->failWith(GAIL_ERROR_CANCELLED, "canceled");
         l.unlock();
         d->fill(*img, *job);
         job->ownedDst = false;

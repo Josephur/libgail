@@ -139,7 +139,7 @@ jobs:
       - name: Decoder tests
         working-directory: build
         run: |
-          for t in pool bitio tagtree progression geometry parse2k t1dec t1kernel decode2k mutate; do
+          for t in pool bitio tagtree progression geometry parse2k t1dec t1kernel decode2k mutate decloss; do
             ./gail-tests "$t"
           done
 

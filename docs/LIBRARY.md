@@ -490,7 +490,11 @@ GPU that no CUDA plugin has code for leaves the decoder on CUDA with the next on
   has worked through them. In pull mode it returns `GAIL_EAGAIN` instead, having taken
   nothing, once the next picture in order is ready: receive it, then send the same
   codestream again (FFmpeg's send / receive rule). A send from inside `on_image` never
-  waits for the backlog.
+  waits: the codestream is queued at once, since the callback's thread may be the only one
+  that could make room (with one frame in flight). A callback that sends one codestream
+  per picture keeps the decoder busy without ever blocking; one that sends several per
+  picture makes the queue grow. `gail_decoder_decode()` works from inside `on_image` too,
+  even with one frame in flight: the frame may then be decoded on the callback's thread.
 * **Reduced size:** `config.reduce = 1` decodes at half size, `2` at a quarter (rounded
   up), by leaving out wavelet levels: much less work, for previews or a 2K display of a 4K
   track.
@@ -498,10 +502,18 @@ GPU that no CUDA plugin has code for leaves the decoder on CUDA with the next on
   its own: `gail_decoder_decode()` returns the status, and in pull or callback mode the
   image arrives in its place in the order with a negative `status` and no picture, with
   the reason in `gail_last_error()`. The decoder carries on. `gail_decoder_error()` is
-  only set when a device fails; the decoder then stops, and every later send or decode
-  returns that failure.
+  only set when a device fails, while the decoder is being set up or in the middle of the
+  stream (a GPU that is lost or reset, a driver error). The decoder then stops: the frame
+  the device failed on and every frame sent before and not yet decoded come back with
+  `GAIL_ERROR_FAILED`, nothing more goes to the device, and every later send or decode
+  returns that failure. The app destroys the decoder and makes a new one, if it wants to
+  carry on (perhaps on another device). Running out of device memory for one frame fails
+  only that frame.
 * **Seeking:** `gail_decoder_flush()` drops what was sent and not yet received.
-  `gail_decoder_cancel()` stops everything at once.
+  `gail_decoder_cancel()` stops everything at once: calls that are waiting return
+  `GAIL_ERROR_CANCELLED`. A `gail_decoder_decode()` whose frame is on a device by then
+  waits for the device to finish with it (it may be writing into the caller's buffer)
+  and returns `GAIL_ERROR_CANCELLED` too, without the picture.
 * **Device memory:** a frame in flight takes about 0.26 GB (4K) or 0.07 GB (2K) on a GPU.
   A device that cannot hold the requested number runs fewer, with a warning.
 * **Agreement between backends:** the CUDA and Vulkan decoders reproduce the CPU decoder's
