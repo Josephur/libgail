@@ -120,6 +120,9 @@ std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const st
         // "auto" went past CUDA for these devices: say what CUDA had against them
         if (ok && cudaLacks && log)
             for (const auto& note : cudaBackendNotes()) log(LogLevel::Info, note);
+#else
+        (void)log;
+        (void)cudaLacks;
 #endif
         if (!ok)
             throw std::runtime_error("no " + (backend == "auto" ? std::string("GPU") : backend + " device") +

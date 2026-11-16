@@ -393,7 +393,7 @@ static void testFrameCpu(Profile prof) {
     }
 }
 
-#ifdef GAIL_HAVE_VULKAN
+#if defined(GAIL_HAVE_VULKAN) || defined(GAIL_HAVE_CUDA)
 static void testGpu(Profile prof, bool cuda) {
     int W, H;
     containerSize(prof, Container::Flat, W, H);
@@ -889,7 +889,7 @@ static void testColor() {
 
 // GPU color kernels against the CPU reference for every color mode (an HDR source
 // exercises the tone map and gamut stages; the frame tests use SDR patterns).
-static void testGpuColor(bool cuda) {
+[[maybe_unused]] static void testGpuColor(bool cuda) {
     const int W = 1998, H = 1080;
     FrameLayout L = makeLayout(W, H, Profile::Cinema2K, 1.0);
     auto src = openPatternSource(W, H, 1, 5);
@@ -902,6 +902,7 @@ static void testGpuColor(bool cuda) {
 #ifdef GAIL_HAVE_VULKAN
     if (!cuda) devs = testGpus(false, stderrLogger(false));
 #endif
+    (void)cuda;  // a build without a GPU backend tests none
     if (devs.empty()) return;
     struct Mode {
         const char* name;
@@ -1004,7 +1005,7 @@ static void testFitSlots() {
 
 // The slot footprint estimate against what the driver reports, and the memory limit /
 // soft out-of-memory path of the pipeline on every GPU of a backend.
-static void testGpuMemory(bool cuda) {
+[[maybe_unused]] static void testGpuMemory(bool cuda) {
     std::vector<std::unique_ptr<Device>> devs;
 #ifdef GAIL_HAVE_CUDA
     if (cuda) devs = testGpus(true, stderrLogger(false));
