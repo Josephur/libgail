@@ -473,10 +473,14 @@ int gail_decoder_create(const gail_decoder_config* c, gail_decoder** decoder) {
         if (cfg.reduce < 0 || cfg.reduce > 32) throw ApiError(GAIL_ERROR_INVALID, "invalid reduce");
         if (cfg.frames_in_flight < 0) throw ApiError(GAIL_ERROR_INVALID, "invalid frames_in_flight");
 
+        if (cfg.num_devices < 0 && (cfg.devices || cfg.num_devices != GAIL_ALL_DEVICES))
+            throw ApiError(GAIL_ERROR_INVALID, "invalid num_devices");
         std::vector<int> select(cfg.devices, cfg.devices + (cfg.devices ? std::max(cfg.num_devices, 0) : 0));
         std::vector<std::string> ids;
         for (int i = 0; cfg.device_ids && i < cfg.num_device_ids; ++i)
             if (cfg.device_ids[i]) ids.emplace_back(cfg.device_ids[i]);
+        // Nothing chosen: the first device, unless every one was asked for
+        if (select.empty() && ids.empty() && cfg.num_devices != GAIL_ALL_DEVICES) select.push_back(0);
         cfg.devices = nullptr;  // not kept: only read here
         cfg.device_ids = nullptr;
 

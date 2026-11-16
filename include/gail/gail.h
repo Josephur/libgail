@@ -440,10 +440,15 @@ GAIL_API void gail_image_free(gail_image* img);
 
 typedef void (*gail_image_cb)(void* user, const gail_image* img); /* img->data valid during the call only */
 
+/* gail_decoder_config.num_devices with devices NULL: decode on every device of the backend */
+#define GAIL_ALL_DEVICES (-1)
+
 typedef struct gail_decoder_config {
     size_t struct_size;       /* sizeof(gail_decoder_config), set by gail_decoder_config_defaults() */
     gail_backend backend;
-    const int* devices;       /* device indices to use; NULL = all */
+    /* Device indices to use. NULL: the first device only (one GPU keeps up with playback
+       several times over); NULL with num_devices = GAIL_ALL_DEVICES: every device. */
+    const int* devices;
     int num_devices;
     const char* const* device_ids;  /* or by ID, as gail_config.device_ids */
     int num_device_ids;
@@ -465,7 +470,7 @@ typedef struct gail_decoder_config {
     gail_log_level log_level;
 } gail_decoder_config;
 
-/* Defaults: all devices of the best backend, GAIL_PIX_XYZ12_MSB, full size. */
+/* Defaults: the first device of the best backend, GAIL_PIX_XYZ12_MSB, full size. */
 GAIL_API void gail_decoder_config_init(gail_decoder_config* c, size_t struct_size);
 GAIL_INLINE void gail_decoder_config_defaults(gail_decoder_config* c) { gail_decoder_config_init(c, sizeof(gail_decoder_config)); }
 

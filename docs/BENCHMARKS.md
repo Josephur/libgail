@@ -129,7 +129,7 @@ spread again being what else the machine was doing. Run back to back with GAIL's
 backend under the same load, it gave 13.4 fps at 4K against GAIL's 17.9, and 32 fps at
 2K against 34. OpenJPEG 2.5.4 decodes a 4K frame in about 340 ms on one thread.
 
-Through FFmpeg with the `libgail` decoder (`ffmpeg -c:v libgail -i picture.mxf -f null -`,
+Through FFmpeg with the `libgail` decoder (`ffmpeg -gpus all -c:v libgail -i picture.mxf -f null -`,
 both GPUs, the whole 724-frame track including the MXF demuxer): 121 to 137 fps at 4K and
 273 to 289 fps at 2K, against 16.5 and 43 fps with `-c:v jpeg2000`. CPU time for the 4K
 track: 14 s with `libgail`; the `jpeg2000` decoder used 177 s for a third of it.

@@ -30,7 +30,7 @@ void usage() {
         "      --frames N          decode only the first N codestreams\n"
         "      --loops N           decode the set N times over (for timing; default 1)\n"
         "      --backend B         auto | cuda | vulkan | cpu (default auto)\n"
-        "      --gpus LIST         devices to use: 'all' (default) or indices (0,1)\n"
+        "      --gpus LIST         devices to use: indices (0,1) or 'all' (default: the first)\n"
         "      --list-devices      list the devices of every backend and exit\n"
         "      --slots N           frames in flight per device\n"
         "      --threads N         CPU backend threads (default: the cores this process may use)\n"
@@ -53,7 +53,7 @@ bool readFile(const std::string& path, std::vector<uint8_t>& out) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string input, outDir, backend = "auto", gpus = "all";
+    std::string input, outDir, backend = "auto", gpus;
     int reduce = 0, frames = -1, loops = 1, slots = 0, threads = 0;
     bool lowBits = false, lowPriority = false, verbose = false, info = false, listDevices = false;
     for (int i = 1; i < argc; ++i) {
@@ -161,7 +161,9 @@ int main(int argc, char** argv) {
     cfg.low_priority = lowPriority;
     if (verbose) cfg.log = onLog;
     std::vector<int> devices;
-    if (gpus != "all") {
+    if (gpus == "all") {
+        cfg.num_devices = GAIL_ALL_DEVICES;
+    } else if (!gpus.empty()) {
         for (size_t p = 0; p < gpus.size();) {
             const size_t q = gpus.find(',', p);
             devices.push_back(std::atoi(gpus.substr(p, q - p).c_str()));

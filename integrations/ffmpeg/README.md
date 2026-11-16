@@ -109,8 +109,9 @@ yet.
 |---|---|---|---|
 | `-lowres` | 0 to 5 | 0 | resolution levels to leave out: 1 = half size, 2 = a quarter |
 | `-backend` | `auto`, `cuda`, `vulkan`, `cpu` | auto | |
-| `-gpus` | `list`, indices (`0,1`), UUIDs as `nvidia-smi -L` prints them, or PCI bus IDs | all | `-gpus list` prints the devices |
+| `-gpus` | `list`, `all`, indices (`0,1`), UUIDs as `nvidia-smi -L` prints them, or PCI bus IDs | the first GPU | one GPU keeps up with 4K playback several times over; `all` for the most frames per second when transcoding |
 | `-inflight` | frames per GPU | 3 | |
+| `-queue` | 1 to 64 | 16 | codestreams handed to the decoder before it waits for a picture |
 
 ## Tested
 
