@@ -6,7 +6,7 @@ tagged `vX.Y.Z` and published with prebuilt archives on the
 release is binary compatible with the ones before it (see
 [docs/LIBRARY.md](docs/LIBRARY.md#compatibility)).
 
-## 1.1.1 — unreleased
+## Unreleased
 
 Fixes to the decoder. The header and the binary interface are unchanged.
 
