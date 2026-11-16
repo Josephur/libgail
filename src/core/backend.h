@@ -96,6 +96,7 @@ struct DeviceInfo {
     std::string uuid;        // "GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" (nvidia-smi style); "" if unknown
     std::string pciBusId;    // "0000:01:00.0"; "" if unknown
     uint64_t memoryBytes = 0;
+    std::string plugin;      // CUDA: the backend plugin that serves the device, "gail_cuda13"; "" elsewhere
 };
 // 16 UUID bytes as nvidia-smi prints them.
 std::string formatGpuUuid(const uint8_t bytes[16]);
@@ -128,8 +129,19 @@ std::vector<std::unique_ptr<Device>> createVulkanDevices(const std::vector<int>&
 std::vector<DeviceInfo> listVulkanDevices();
 #endif
 #ifdef GAIL_HAVE_CUDA
+// The CUDA devices that can be used: those a backend plugin is there for and whose
+// kernels load on the device (cuda/cuda_host.h). A GPU no plugin can run is in neither
+// list, so that "auto" goes on to Vulkan for it.
 std::vector<std::unique_ptr<Device>> createCudaDevices(const std::vector<int>& select, const Logger& log);
 std::vector<DeviceInfo> listCudaDevices();
+// Why the CUDA device with this index cannot be used: "" when it can, or there is none.
+std::string cudaDeviceUnusable(int index);
+// The state of the backend, a line each: the plugins loaded, or why not, and the devices
+// that cannot be used.
+std::vector<std::string> cudaBackendNotes();
+// The plugins loaded, "gail_cuda13 gail_cuda12", or "no CUDA plugins"; "" when the
+// backend is linked in (a static library).
+std::string cudaPluginsLoaded();
 #endif
 
 }  // namespace gail

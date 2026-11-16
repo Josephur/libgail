@@ -16,6 +16,7 @@
 
 #include "core/backend.h"
 #include "core/t1_ref.h"
+#include "cuda/cuda_backend.h"
 #include "cuda/cuda_common.h"
 #include "cuda/cuda_decode.h"
 #include "kernels/dwt97.h"
@@ -774,7 +775,7 @@ SlotSizes slotSizes(const FrameLayout& L, const EncodeSettings& s) {
     return z;
 }
 
-class CudaSlot : public EncoderSlot {
+class CudaSlot : public CudaEncoderSlot {
 public:
     CudaSlot(int dev, const FrameLayout& L, const EncodeSettings& s, const Logger& log)
         : dev_(dev), L_(L), s_(s), log_(log) {
@@ -866,7 +867,7 @@ public:
         frameParams_[1] = (float)s_.bitsPerSymbol;
     }
 
-    void encode(const void* frame, Tier1Frame& out, FrameTimings* tm, FrameDebug* dbg) override {
+    Tier1View encodeView(const void* frame, FrameTimings* tm, FrameDebug* dbg) override {
         const auto t0 = std::chrono::steady_clock::now();
         CUCHECK(cudaSetDevice(dev_));
         const uint32_t W = L_.width, H = L_.height, npix = W * H;
@@ -941,17 +942,18 @@ public:
                 CUCHECK(cudaMemcpy(dbg->wavelet.data(), planesA_, (size_t)npix * 12, cudaMemcpyDeviceToHost));
             }
         }
+        Tier1View view;
         if (!ok) {
             if (log_)
                 log_(LogLevel::Warning, "cuda: Tier-1 buffer overflow (flags " + std::to_string(flags) +
                                             "), using CPU fallback for this frame");
-            cpuFallback(out);
+            cpuFallback(fallback_);
+            view = {fallback_.info.data(), fallback_.passLen.data(), fallback_.passDist.data(), fallback_.data.data(),
+                    fallback_.info.size(), fallback_.passLen.size(), fallback_.data.size()};
         } else {
-            out.info.resize(n_);
-            std::memcpy(out.info.data(), hostInfo_, (size_t)n_ * sizeof(CblkInfo));
-            out.passLen.assign(hostPass_, hostPass_ + totalPasses);
-            out.passDist.assign((const int32_t*)hostPass_ + passCap_, (const int32_t*)hostPass_ + passCap_ + totalPasses);
-            out.data.assign(hostData_, hostData_ + totalData);
+            // the pinned buffers themselves: the caller copies them where it wants them
+            view = {reinterpret_cast<const CblkInfo*>(hostInfo_), hostPass_, (const int32_t*)hostPass_ + passCap_, hostData_,
+                    n_, totalPasses, totalData};
         }
         if (tm) {
             float ms[7];
@@ -971,6 +973,7 @@ public:
             tm->codedBytes = totalData;
             tm->total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         }
+        return view;
     }
 
 private:
@@ -1031,6 +1034,7 @@ private:
     const FrameLayout& L_;
     EncodeSettings s_;
     Logger log_;
+    Tier1Frame fallback_;  // what a CPU fallback coded
     uint32_t n_ = 0;
     size_t symCap_ = 0, outCap_ = 0, passCap_ = 0, dataCap_ = 0, inBytes_ = 0;
     cudaStream_t stream_ = nullptr;
@@ -1102,39 +1106,48 @@ private:
 
 }  // namespace
 
-std::vector<DeviceInfo> listCudaDevices() {
+std::vector<CudaDeviceDesc> cudaEnumerate() {
     int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess) return {};
-    std::vector<DeviceInfo> out;
+    if (const cudaError_t e = cudaGetDeviceCount(&n); e != cudaSuccess) {
+        cudaGetLastError();
+        throw std::runtime_error(cudaGetErrorString(e));  // "no CUDA-capable device is detected", an insufficient driver, ...
+    }
+    std::vector<CudaDeviceDesc> out;
     for (int i = 0; i < n; ++i) {
         cudaDeviceProp p;
-        if (cudaGetDeviceProperties(&p, i) != cudaSuccess) continue;
-        DeviceInfo d;
-        d.index = i;
-        d.name = p.name;
-        d.uuid = formatGpuUuid(reinterpret_cast<const uint8_t*>(p.uuid.bytes));
+        if (cudaGetDeviceProperties(&p, i) != cudaSuccess) {
+            cudaGetLastError();
+            continue;
+        }
+        CudaDeviceDesc d;
+        d.info.index = i;
+        d.info.name = p.name;
+        d.info.uuid = formatGpuUuid(reinterpret_cast<const uint8_t*>(p.uuid.bytes));
         char pci[32];
         std::snprintf(pci, sizeof pci, "%04x:%02x:%02x.0", p.pciDomainID, p.pciBusID, p.pciDeviceID);
-        d.pciBusId = pci;
-        d.memoryBytes = p.totalGlobalMem;
+        d.info.pciBusId = pci;
+        d.info.memoryBytes = p.totalGlobalMem;
+        d.smMajor = p.major;
+        d.smMinor = p.minor;
         out.push_back(d);
     }
     return out;
 }
 
-std::vector<std::unique_ptr<Device>> createCudaDevices(const std::vector<int>& select, const Logger& log) {
-    int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess) return {};
-    std::vector<std::unique_ptr<Device>> out;
-    for (int i = 0; i < n; ++i) {
-        if (!select.empty() && std::find(select.begin(), select.end(), i) == select.end()) continue;
-        try {
-            out.push_back(std::make_unique<CudaDevice>(i, log));
-        } catch (const std::exception& e) {
-            if (log) log(LogLevel::Warning, "cuda: skipping device " + std::to_string(i) + ": " + e.what());
-        }
+std::string cudaKernelsUnusable(int device) {
+    cudaError_t e = cudaSetDevice(device);
+    if (e == cudaSuccess) {
+        // Any kernel will do: asking for its attributes loads this build's code for the
+        // device, or fails the way the first launch would.
+        cudaFuncAttributes attr;
+        e = cudaFuncGetAttributes(&attr, scanKernel);
     }
-    return out;
+    if (e == cudaSuccess) return "";
+    cudaGetLastError();
+    if (e == cudaErrorNoKernelImageForDevice || e == cudaErrorInvalidDeviceFunction) return "not built for this architecture";
+    return cudaGetErrorString(e);
 }
+
+std::unique_ptr<Device> createCudaDevice(int device, const Logger& log) { return std::make_unique<CudaDevice>(device, log); }
 
 }  // namespace gail
