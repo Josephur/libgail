@@ -490,7 +490,11 @@ GPU that no CUDA plugin has code for leaves the decoder on CUDA with the next on
   has worked through them. In pull mode it returns `GAIL_EAGAIN` instead, having taken
   nothing, once the next picture in order is ready: receive it, then send the same
   codestream again (FFmpeg's send / receive rule). A send from inside `on_image` never
-  waits for the backlog.
+  waits: the codestream is queued at once, since the callback's thread may be the only one
+  that could make room (with one frame in flight). A callback that sends one codestream
+  per picture keeps the decoder busy without ever blocking; one that sends several per
+  picture makes the queue grow. `gail_decoder_decode()` works from inside `on_image` too,
+  even with one frame in flight: the frame may then be decoded on the callback's thread.
 * **Reduced size:** `config.reduce = 1` decodes at half size, `2` at a quarter (rounded
   up), by leaving out wavelet levels: much less work, for previews or a 2K display of a 4K
   track.

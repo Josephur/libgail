@@ -489,7 +489,8 @@ GAIL_API const char* gail_decoder_devices(const gail_decoder* d);  /* "NVIDIA ..
    taken yet (about two more than the frames in flight): with on_image set, send then
    blocks until the callback has worked through them; without it, send returns
    GAIL_EAGAIN, having taken nothing, once the next image in order can be received:
-   receive it, then send the same codestream again. dest may be NULL (the library allocates the image; release it with
+   receive it, then send the same codestream again. A send from inside on_image never
+   blocks: the codestream is queued at once. dest may be NULL (the library allocates the image; release it with
    gail_image_free()) or name the caller's buffer in dest->data[0] with its row length in
    dest->stride[0] (bytes; 0 = tightly packed, otherwise at least 6 x width; bytes of a row
    past the picture are not written; dest->width and dest->height, when not 0, must be the
@@ -510,7 +511,8 @@ GAIL_API int gail_decoder_receive(gail_decoder* d, gail_image* img, int wait);
    are decoded concurrently. On entry img must be zeroed, or name the caller's buffer in
    img->data[0] / img->stride[0] as for gail_decoder_send(). Returns the frame's status:
    a negative one leaves no picture. Frames decoded this way never appear in receive /
-   on_image. */
+   on_image. It may be called from inside on_image, even with one frame in flight (the
+   frame may then be decoded on the callback's own thread). */
 GAIL_API int gail_decoder_decode(gail_decoder* d, const gail_packet* pkt, gail_image* img);
 
 /* For a seek: drops every frame handed over with gail_decoder_send() and not yet

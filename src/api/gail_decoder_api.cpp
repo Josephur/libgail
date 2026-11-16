@@ -131,9 +131,12 @@ struct Job {
     }
 };
 
-// The decoder whose on_image callback this thread is in, if any: a send from the callback
-// must not wait for the backlog it is itself working off.
+// The decoder whose on_image callback this thread is in, if any: a send or a decode from
+// the callback must not wait for work that only this thread may be there to do.
 thread_local const void* tlsDelivering = nullptr;
+// The decoder this thread is a worker of, and its gail_decoder::Worker.
+thread_local const void* tlsWorkerOf = nullptr;
+thread_local void* tlsWorker = nullptr;
 
 }  // namespace
 
@@ -292,6 +295,8 @@ struct gail_decoder {
 
     void run(Worker& w) {
         if (cfg.low_priority) lowerCurrentThreadPriority();
+        tlsWorkerOf = this;
+        tlsWorker = &w;
         for (;;) {
             std::shared_ptr<Job> job;
             {
@@ -660,10 +665,12 @@ int gail_decoder_send(gail_decoder* d, const gail_packet* pkt, const gail_image*
         // backlog goes down by itself, so this waits for it; in pull mode only the app can
         // take pictures off it, so once the next one in order is there, this says so.
         const bool pull = d->cfg.on_image == nullptr, fromCallback = tlsDelivering == d;
+        // A send from on_image does not wait at all: the thread it is on may be the only
+        // one that could make room (one frame in flight).
         d->doneCv.wait(l, [&] {
-            if (d->canceled.load()) return true;
+            if (d->canceled.load() || fromCallback) return true;
             if (d->queue.size() >= std::max<size_t>(d->workers.size(), 1)) return false;
-            if (fromCallback || d->backlog() < d->backlogLimit()) return true;
+            if (d->backlog() < d->backlogLimit()) return true;
             return pull && d->ready.count(d->nextOut) != 0;
         });
         if (d->canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
@@ -720,6 +727,19 @@ int gail_decoder_decode(gail_decoder* d, const gail_packet* pkt, gail_image* img
         if (int r = prepareDestination(d, *job, img)) return r;
         job->cs.assign(pkt->data, pkt->data + pkt->size);
         std::unique_lock<std::mutex> l(d->m);
+        if (tlsDelivering == d && tlsWorkerOf == d) {
+            // From on_image on one of the workers: its slot is idle, and it may be the only
+            // one (one frame in flight), so the frame is decoded here rather than queued for
+            // the thread that is waiting for it
+            job->index = d->nextBlocking++;
+            l.unlock();
+            d->decodeOne(*job, *static_cast<gail_decoder::Worker*>(tlsWorker));
+            if (d->canceled.load()) job->failWith(GAIL_ERROR_CANCELLED, "canceled");
+            d->fill(*img, *job);
+            job->ownedDst = false;
+            if (job->status != GAIL_OK) return fail(job->status, job->error);
+            return GAIL_OK;
+        }
         d->doneCv.wait(l, [&] { return d->canceled.load() || d->queue.size() < d->workers.size(); });
         if (d->canceled.load()) return fail(GAIL_ERROR_CANCELLED, "canceled");
         job->index = d->nextBlocking++;

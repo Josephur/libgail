@@ -713,6 +713,36 @@ static void test_decoder_contracts(const dec_set* s) {
     /* A send, or a blocking decode, from inside on_image with one frame in flight and the
        app's next codestream queued: neither waits for the queue that only this thread
        could work off */
+    for (int nest = 1; nest <= 2; ++nest) {
+        const char* what = nest == 1 ? "send" : "decode";
+        dec_contract c;
+        memset(&c, 0, sizeof c);
+        lock_init(&c.queued.lock);
+        lock_init(&c.back.lock);
+        c.s = s;
+        c.app = thread_self();
+        c.nest = nest;
+        c.d = dec_cpu(dec_contract_image, &c);
+        if (c.d) {
+            CHECK(gail_decoder_send(c.d, &s->pkt[0], NULL) == GAIL_OK, "nested %s: send 0: %s", what, gail_last_error());
+            CHECK(gail_decoder_send(c.d, &s->pkt[1], NULL) == GAIL_OK, "nested %s: send 1: %s", what, gail_last_error());
+            flag_raise(&c.queued, 1);
+            const int back = flag_wait(&c.back, 10000);
+            CHECK(back, "a %s from on_image was still waiting after 10 s", what);
+            if (!back) {
+                gail_decoder_cancel(c.d); /* lets it go */
+            } else {
+                CHECK(gail_decoder_finish(c.d) == GAIL_OK, "nested %s: finish: %s", what, gail_last_error());
+                CHECK(c.nested == GAIL_OK, "%s from on_image: %s", what, gail_status_string(c.nested));
+                const int want = nest == 1 ? 3 : 2; /* a frame decoded with gail_decoder_decode() skips on_image */
+                CHECK(c.calls == want && c.out_of_order == 0 && c.status[0] == GAIL_OK && c.status[want - 1] == GAIL_OK,
+                      "nested %s: %d images (%d out of order)", what, c.calls, c.out_of_order);
+            }
+            gail_decoder_destroy(c.d);
+        }
+        lock_free(&c.queued.lock);
+        lock_free(&c.back.lock);
+    }
 }
 
 static void test_decoder(void) {
