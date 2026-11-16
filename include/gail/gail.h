@@ -100,7 +100,9 @@ GAIL_API const char* gail_last_error(void);
 GAIL_API const char* gail_status_string(int status);
 
 /* GAIL_VERSION of the library actually loaded, and its full version and backends, e.g.
- * "1.1.0 (cuda vulkan cpu)" for a release or "1.1.0+3.gabc1234 (cuda vulkan cpu)" between releases. */
+ * "1.1.0 (cuda vulkan cpu; gail_cuda13 gail_cuda12)" for a release or
+ * "1.1.0+3.gabc1234 (cuda vulkan cpu; gail_cuda13 gail_cuda12)" between releases; the
+ * part after ';' names the CUDA plugins loaded. */
 GAIL_API unsigned gail_version(void);
 GAIL_API const char* gail_version_string(void);
 

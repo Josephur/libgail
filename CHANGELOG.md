@@ -27,7 +27,15 @@ A decoder. Everything the 1.0 header declared is unchanged. The encoder codes fr
 * `gail_probe()` reads a codestream's header and says what it is and whether it can be
   decoded here.
 * Codestreams are untrusted input. A damaged or unsupported one fails on its own, with
-  the reason in `gail_last_error()`, and the decoder carries on with the next.
+  the reason in `gail_last_error()`, and the decoder carries on with the next. A device
+  failure stops the decoder for good: later calls return it, and the decoder is not set
+  up again from another codestream.
+* The decoder holds only a few decoded pictures the app has not taken yet, so a slow
+  consumer does not make memory grow: with `on_image`, `gail_decoder_send()` waits for
+  the callback; in pull mode it returns `GAIL_EAGAIN`, taking nothing, until a picture
+  has been received.
+* A destination buffer that gives its `width` and `height` only takes a picture of that
+  size.
 * The COM marker of every frame names the kind of device that encoded it after the version:
   `vulk` for Vulkan, `cuda` and the toolkit version for CUDA (`GAIL 1.1.0 cuda13.4`),
   nothing for the CPU. The frame budget allows for the longest tag, which leaves 10 bytes
@@ -45,12 +53,15 @@ A decoder. Everything the 1.0 header declared is unchanged. The encoder codes fr
   Applications ship both files in the library's directory; nothing in the API changes.
   See [docs/LIBRARY.md](docs/LIBRARY.md#cuda-plugins).
 * `GAIL_BACKEND_AUTO` no longer picks CUDA for a GPU the CUDA backend has no code for, and
-  goes on to Vulkan when CUDA can run none of the GPUs. `GAIL_BACKEND_CUDA` asked for by
-  name fails for such a GPU when the encoder is created, with the reason.
+  goes on to Vulkan when CUDA can run none of the GPUs.
 * Listing devices goes by each GPU's architecture and sets nothing up on it: no CUDA
   context and no device memory stays behind. The kernels are loaded when an encoder or
   decoder sets a GPU up, and a GPU they do not load on (a full one, for instance) is left
   out then, with the reason.
+* With `GAIL_BACKEND_CUDA`, a GPU that has no code in either plugin, or that its kernels
+  do not load on, is left out like that too; creating the encoder or decoder fails, with
+  the reason, only when that GPU was named in `devices` / `device_ids` or no CUDA GPU is
+  left.
 * `gail-enc --list-devices` shows the plugin that serves each CUDA device, and
   `gail_version_string()` names the plugins loaded.
 * Build: `GAIL_CUDA13_ROOT` and `GAIL_CUDA12_ROOT` name the two toolkits, and
@@ -61,12 +72,17 @@ A decoder. Everything the 1.0 header declared is unchanged. The encoder codes fr
 
 * `gail-dec` decodes a codestream or a directory of them to raw X'Y'Z' frames, times the
   decode when no output is asked for, and with `--info` prints what each codestream is.
+  `--gpus` takes indices or device IDs (UUIDs, PCI bus IDs) as `gail-enc` does, and an
+  ID that matches no device is an error. Installed, it finds the shared library in the
+  `lib/` next to its `bin/`.
 
 ### FFmpeg
 
 * A `libgail` decoder next to the encoder (`integrations/ffmpeg/libgaildec.c`), added by the
   same `add-to-ffmpeg.sh`. It is selected by name (`-c:v libgail` before the input),
-  decodes into FFmpeg's own frame buffers and supports `-lowres`.
+  decodes into FFmpeg's own frame buffers and supports `-lowres`. A codestream of another
+  size than the stream's first is refused rather than decoded into a frame of the wrong
+  size. FFmpeg's `configure` now looks for a libgail that has the decoder.
 
 ### Other
 

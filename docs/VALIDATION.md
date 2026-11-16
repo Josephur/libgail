@@ -140,7 +140,7 @@ back on the following equipment:
 | Kind | Tested |
 |---|---|
 | Projectors | Christie Solaria One, Christie CP2210, Christie CP2220, NEC NC900C-A |
-| Theatre management system (LMS) | ScreenWriter Plus 2.7.5-1983 |
+| Theater management system (LMS) | ScreenWriter Plus 2.7.5-1983 |
 | Integrated media block (IMB) | GDC SR-1000 |
 
 This is a list of equipment that has been tried, not a certification: it does not cover

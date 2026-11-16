@@ -274,5 +274,7 @@ Every source file carries an `SPDX-License-Identifier: MIT` line.
 
 * `integrations/ffmpeg/libgailenc.c` and `libgaildec.c` are additionally offered under
   FFmpeg's LGPL-2.1-or-later, as FFmpeg requires for code in its tree; they carry that header.
-* The CUDA runtime inside `libgail` is NVIDIA's, redistributed under the CUDA EULA.
+* The CUDA runtime inside the two CUDA plugins (`gail_cuda13`, `gail_cuda12`), and inside
+  the static `libgail.a` of a CUDA build, is NVIDIA's, redistributed under the CUDA EULA.
+  The shared library itself contains no CUDA code.
 * JPEG 2000 Part 1, the only codec here, is royalty-free under the standard's patent policy.

@@ -39,8 +39,10 @@ SMPTE 429-4 and libdcp's verifier):
 | Size | ≤ 250 Mbit/s per frame, ≤ 200 Mbit/s per component / tile-part | same |
 
 Only SOC, SIZ, COD, QCD, POC, COM, TLM, SOT, SOD and EOC markers are written. The COM
-marker holds the text `GAIL <version>`, so a frame's encoder and build can be read from
-the codestream; it counts toward the frame's size limit.
+marker holds the text `GAIL <version>` followed, after a space, by the kind of device that
+encoded the frame: `vulk` for Vulkan, `cuda` and the toolkit's major.minor for CUDA
+(`GAIL 1.1.0 cuda13.4`), nothing for the CPU. A frame's encoder, build and device can so
+be read from the codestream; the marker counts toward the frame's size limit.
 
 ## Color
 

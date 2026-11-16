@@ -11,8 +11,9 @@
 #   release-tag    on v* tags only: the tag must match the version in gail.h
 #   release        on v* tags only, after everything else passes: packages the four builds as archives
 #                  with SHA256SUMS and attaches them to a DRAFT GitHub release for review
-# GitHub's runners have no GPU: the CUDA and Vulkan backends are compiled everywhere, the
-# tests run on the CPU backend (GPU tests skip themselves). The CUDA backend is two plugins,
+# GitHub's runners have no GPU: each job compiles the backends listed above (CUDA in linux
+# and windows-msvc, Vulkan in those and windows-mingw and ffmpeg, the CPU backend in all),
+# and the tests run on the CPU backend (GPU tests skip themselves). The CUDA backend is two plugins,
 # gail_cuda13 built with CUDA 13 and gail_cuda12 built with CUDA 12; the jobs that build them
 # check that both are there and that the library loads both.
 name: CI

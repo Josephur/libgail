@@ -21,7 +21,7 @@ backend with no usable device fails (`GAIL_ERROR_UNSUPPORTED`).
 
 | Backend | Needs | Tested on |
 |---|---|---|
-| **CUDA** | An NVIDIA GPU of the **Maxwell generation or newer** (compute capability 5.0 and up): GeForce GTX 750 Ti / 900 / 10 / 16 and RTX 20, 30, 40, 50, the Quadro / RTX A / RTX PRO and data-center parts of those generations. The [CUDA plugin](#cuda-plugins) for the GPU's generation next to the library, and the **NVIDIA driver** that plugin needs. Nothing else: each plugin has its CUDA runtime inside. | RTX 3090 (Ampere), RTX 5060 Ti (Blackwell), Linux; MSVC build on Windows |
+| **CUDA** | An NVIDIA GPU of the **Maxwell generation or newer** (compute capability 5.0 and up): GeForce GTX 750 Ti / 900 / 10 / 16 and RTX 20, 30, 40, 50, the Quadro / RTX A / RTX PRO and data-center parts of those generations. The [CUDA plugin](#cuda-plugins) for the GPU's generation next to the library, and the **NVIDIA driver** that plugin needs. Nothing else: each plugin has its CUDA runtime inside. | RTX 3090 (Ampere), RTX 5060 Ti (Blackwell) on `gail_cuda13`; GeForce GTX 1070 (Pascal), Tesla V100 and CMP 100-210 (Volta) on `gail_cuda12`; Linux; MSVC build on Windows |
 | **Vulkan** | A GPU with a **Vulkan 1.3** driver and a compute queue, 32-wide subgroups (or subgroup size control that allows 32, as AMD's wave64 parts offer), and the core features `shaderInt64`, `shaderInt16`, `shaderInt8`, 8- and 16-bit storage buffers, `bufferDeviceAddress`, `timelineSemaphore` and `synchronization2`. NVIDIA: Pascal (GTX 10) or newer. AMD RDNA and Intel Arc / Xe drivers advertise all of this. `VK_EXT_memory_budget` and `VK_EXT_pci_bus_info` are used when present (frames-in-flight sizing, device IDs). | RTX 3090 and RTX 5060 Ti, Linux and Windows (under Wine). **AMD and Intel are untested**: the shaders use only core Vulkan 1.3, so they are expected to work; reports welcome |
 | **CPU** | Any x86-64 or arm64 CPU. Multithreaded reference implementation; its Tier-1 coding is bit-exact with the GPU backends. | Linux, Windows, macOS |
 
@@ -92,8 +92,10 @@ and newer the CUDA 13.4 plugin.
   milliseconds the first time in a process, and leaves no device memory in use. Whether
   the kernels really load on the GPU is found out when an encoder or decoder sets it up. A
   GPU where they do not, such as one whose memory is full, is then left out with the
-  reason at `GAIL_LOG_WARNING`: `GAIL_BACKEND_AUTO` carries on with the other CUDA GPUs,
-  or with Vulkan when none is left, and `GAIL_BACKEND_CUDA` fails.
+  reason at `GAIL_LOG_WARNING`, and the others are used: `GAIL_BACKEND_AUTO` carries on
+  with the other CUDA GPUs, or with Vulkan when none is left. `GAIL_BACKEND_CUDA` carries
+  on with the other CUDA GPUs too, and fails only when that GPU was one of those named in
+  `devices` / `device_ids`, or when no CUDA GPU is left.
 * **Static library.** `libgail.a` cannot carry plugins, so it has one backend linked in:
   the CUDA 13 one when the build had both toolkits. It serves the GPUs that backend has
   code for.
@@ -117,7 +119,7 @@ This installs:
   each CUDA toolkit the build had;
 * `lib/pkgconfig/gail.pc`;
 * `lib/cmake/gail/` (`find_package(gail)`, target `gail::gail`);
-* `gail-enc` and `gail-check`.
+* `gail-enc`, `gail-dec` and `gail-check`.
 
 Build requirements:
 
@@ -242,8 +244,10 @@ request:
 | `macos` | macOS 15, Apple clang (arm64) | CPU | both suites; install, then a pkg-config consumer |
 | `ffmpeg` | Ubuntu 24.04 | FFmpeg with the `libgail` encoder and decoder | encodes a test pattern, which `gail-check` verifies; decodes it again and compares with FFmpeg's own decoder |
 
-* **No GPU on the runners:** the CUDA and Vulkan backends are compiled in every job, but
-  tests run on the CPU backend, and the GPU tests skip themselves. GPU coverage comes from
+* **No GPU on the runners:** each job compiles only some backends: `linux` and
+  `windows-msvc` all three, `windows-mingw` and `ffmpeg` Vulkan and the CPU, `sanitize`
+  and `macos` the CPU backend alone. Tests run on the CPU backend everywhere, and the GPU
+  tests skip themselves. GPU coverage comes from
   running `ctest` on a machine with GPUs.
 * **CUDA:** `ci/fetch_cuda.py` downloads just the CUDA parts needed to compile (NVIDIA's
   redistributable archives, checked against the SHA-256 in NVIDIA's manifest), once for
