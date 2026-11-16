@@ -54,6 +54,7 @@ typedef struct LibGailDecContext {
     int backend;
     char *devices;
     int frames_in_flight;
+    int queue;
 } LibGailDecContext;
 
 static void gail_log(void *user, gail_log_level level, const char *msg)
@@ -94,7 +95,9 @@ static av_cold int libgail_dec_init(AVCodecContext *avctx)
                 av_log(avctx, AV_LOG_INFO, "%s", list);
         return AVERROR_EXIT;
     }
-    if (s->devices && *s->devices) {
+    if (s->devices && !strcmp(s->devices, "all")) {
+        cfg.num_devices = GAIL_ALL_DEVICES;
+    } else if (s->devices && *s->devices) {
         /* indices ("0,1") or IDs: UUIDs as nvidia-smi prints them, or PCI bus IDs */
         char *save = NULL, *tok;
         if (!(ids_buf = av_strdup(s->devices)))
@@ -125,8 +128,9 @@ static av_cold int libgail_dec_init(AVCodecContext *avctx)
         return gail_error(avctx, ret, "cannot create the Gail decoder");
     av_log(avctx, AV_LOG_INFO, "decoding on %s\n", gail_decoder_devices(s->dec));
 
-    /* enough codestreams in flight to keep every device busy; the library queues beyond */
-    s->capacity = 16;
+    /* codestreams handed over before waiting for a picture: enough to keep every device
+       busy, and more to ride out a slow frame; the library queues beyond what is decoding */
+    s->capacity = s->queue;
     s->pkt = av_packet_alloc();
     s->frames = av_fifo_alloc2(32, sizeof(AVFrame *), AV_FIFO_FLAG_AUTO_GROW);
     if (!s->pkt || !s->frames)
@@ -285,8 +289,9 @@ static const AVOption options[] = {
         { "cuda",   NULL, 0, AV_OPT_TYPE_CONST, { .i64 = GAIL_BACKEND_CUDA },   0, 0, VD, .unit = "backend" },
         { "vulkan", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = GAIL_BACKEND_VULKAN }, 0, 0, VD, .unit = "backend" },
         { "cpu",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = GAIL_BACKEND_CPU },    0, 0, VD, .unit = "backend" },
-    { "gpus", "devices: indices (0,1), UUIDs as nvidia-smi prints them, PCI bus IDs, or \"list\" (default: all)", OFFSET(devices), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, VD },
+    { "gpus", "devices: indices (0,1), UUIDs as nvidia-smi prints them, PCI bus IDs, \"all\" or \"list\" (default: the first)", OFFSET(devices), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, VD },
     { "inflight", "frames in flight per device (0 = default)", OFFSET(frames_in_flight), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 16, VD },
+    { "queue", "codestreams handed to the decoder ahead of the picture returned", OFFSET(queue), AV_OPT_TYPE_INT, { .i64 = 16 }, 1, 64, VD },
     { NULL },
 };
 

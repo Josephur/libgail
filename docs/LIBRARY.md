@@ -332,6 +332,9 @@ file holds them (the caller unwraps the MXF, and decrypts it if it is encrypted)
 returns pictures. It uses the same backends and devices as the encoder, chosen the same
 way (`backend`, `devices` / `device_ids`, `frames_in_flight`, `cpu_threads`,
 `low_priority`, `log` in `gail_decoder_config`), with the same hardware requirements.
+One difference: with no devices named, a decoder uses only the first device, since one GPU
+decodes 4K several times faster than it plays; `num_devices = GAIL_ALL_DEVICES` (with
+`devices` NULL) uses every device.
 
 | | How | Typical caller |
 |---|---|---|
