@@ -383,9 +383,12 @@ if(GAIL_BUILD_TESTS)
       add_library(${target} MODULE tests/test_cuda_plugin.cpp)
       target_include_directories(${target} PRIVATE src)
       target_compile_definitions(${target} PRIVATE TEST_PLUGIN_NAME="${plugin}" TEST_PLUGIN_MODE=${mode})
+      # ARCHIVE too: MSVC writes an import library for the exported entry point, and the
+      # stand-ins share names, so each needs its own directory for it as well.
       set_target_properties(${target} PROPERTIES OUTPUT_NAME ${plugin}
         LIBRARY_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:gail-tests>/test-plugins/${dir}
-        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:gail-tests>/test-plugins/${dir})
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:gail-tests>/test-plugins/${dir}
+        ARCHIVE_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:gail-tests>/test-plugins/${dir})
       add_dependencies(gail-tests ${target})
     endfunction()
     gail_test_plugin(cuda13 gail_cuda13 0)     # modes: see tests/test_cuda_plugin.cpp
