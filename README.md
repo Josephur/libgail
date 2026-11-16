@@ -13,8 +13,8 @@ every frame is verified by an independent checker.
 
 * **Backends:** Vulkan compute (portable: NVIDIA / AMD / Intel; needs 32-wide subgroups),
   CUDA (optional, fastest on NVIDIA; Maxwell / GTX 750 and newer, as two
-  [plugins](#cuda-plugins) next to the library), CPU (reference, bit-exact with both GPU
-  backends).
+  [plugins](#cuda-plugins) next to the library), CPU (reference; Tier-1 coding is
+  bit-exact with both GPU backends).
 * **Multi-GPU:** every GPU runs several frames in flight; a pull scheduler hands frames to
   whichever device is free, so mixed GPUs are used fully.
   Frames in flight are sized to the device memory that is free (a 4K frame takes ~0.7 GB),
@@ -29,7 +29,7 @@ every frame is verified by an independent checker.
   4:4:4) and planar R'G'B' are converted on the GPU, so FFmpeg only decodes. See [docs/COLOR.md](docs/COLOR.md).
 * **Library (v1):** `libgail.so` / `libgail.dll` / `libgail.dylib` / `libgail.a` with one C
   header, [include/gail/gail.h](include/gail/gail.h): pull, callback or thread-safe blocking
-  encoding, R'G'B' / Y'CbCr / X'Y'Z' input, pkg-config and CMake packages. Linux and Windows
+  encoding and decoding, R'G'B' / Y'CbCr / X'Y'Z' input, pkg-config and CMake packages. Linux and Windows
   (MinGW-w64, and MSVC with CUDA) with GPUs; macOS CPU-only so far. See
   [docs/LIBRARY.md](docs/LIBRARY.md).
 * **Decoder:** DCI 2K and 4K codestreams (GAIL's own and other encoders') to 12-bit

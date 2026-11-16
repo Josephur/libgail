@@ -3,6 +3,7 @@
 The encoder's DCI cinema compatibility is checked at six levels, run on every directory
 of encoded frames before a release. Only the first level ships in this repository (`gail-check`); the
 others are external tools and the harness that drives them is not part of the library.
+How the decoder is validated is under [The decoder](#the-decoder).
 
 1. **Own DCI checker** (`gail-check`, also run on every frame inside `gail-enc`): parses
    every marker and enforces the cinema profile rules from ISO 15444-1 Amd.1 /

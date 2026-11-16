@@ -23,7 +23,7 @@ backend with no usable device fails (`GAIL_ERROR_UNSUPPORTED`).
 |---|---|---|
 | **CUDA** | An NVIDIA GPU of the **Maxwell generation or newer** (compute capability 5.0 and up): GeForce GTX 750 Ti / 900 / 10 / 16 and RTX 20, 30, 40, 50, the Quadro / RTX A / RTX PRO and data-center parts of those generations. The [CUDA plugin](#cuda-plugins) for the GPU's generation next to the library, and the **NVIDIA driver** that plugin needs. Nothing else: each plugin has its CUDA runtime inside. | RTX 3090 (Ampere), RTX 5060 Ti (Blackwell), Linux; MSVC build on Windows |
 | **Vulkan** | A GPU with a **Vulkan 1.3** driver and a compute queue, 32-wide subgroups (or subgroup size control that allows 32, as AMD's wave64 parts offer), and the core features `shaderInt64`, `shaderInt16`, `shaderInt8`, 8- and 16-bit storage buffers, `bufferDeviceAddress`, `timelineSemaphore` and `synchronization2`. NVIDIA: Pascal (GTX 10) or newer. AMD RDNA and Intel Arc / Xe drivers advertise all of this. `VK_EXT_memory_budget` and `VK_EXT_pci_bus_info` are used when present (frames-in-flight sizing, device IDs). | RTX 3090 and RTX 5060 Ti, Linux and Windows (under Wine). **AMD and Intel are untested**: the shaders use only core Vulkan 1.3, so they are expected to work; reports welcome |
-| **CPU** | Any x86-64 or arm64 CPU. Multithreaded reference implementation, bit-exact with the GPU backends. | Linux, Windows, macOS |
+| **CPU** | Any x86-64 or arm64 CPU. Multithreaded reference implementation; its Tier-1 coding is bit-exact with the GPU backends. | Linux, Windows, macOS |
 
 * **Older NVIDIA drivers, missing plugins.** A GPU whose plugin is not next to the
   library, or whose driver is too old for that plugin, is not a CUDA device. It is used

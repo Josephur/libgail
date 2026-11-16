@@ -6,7 +6,7 @@ tagged `vX.Y.Z` and published with prebuilt archives on the
 release is binary compatible with the ones before it (see
 [docs/LIBRARY.md](docs/LIBRARY.md#compatibility)).
 
-## Unreleased
+## 1.1.0 — 2026-11-15
 
 A decoder. Everything the 1.0 header declared is unchanged. The encoder codes frames as
 1.0.1 does, except that the COM marker now names the kind of device that encoded each one.
@@ -21,6 +21,9 @@ A decoder. Everything the 1.0 header declared is unchanged. The encoder codes fr
   `xyz12le`, the default) or the low bits, into the library's buffer or straight into the
   caller's with the caller's row length.
 * `gail_decoder_config.reduce` leaves out resolution levels: half size, quarter size.
+* A decoder with no devices named uses the first device of its backend, since one GPU
+  decodes 4K several times faster than it plays; `num_devices = GAIL_ALL_DEVICES` with
+  `devices` NULL uses every device.
 * `gail_probe()` reads a codestream's header and says what it is and whether it can be
   decoded here.
 * Codestreams are untrusted input. A damaged or unsupported one fails on its own, with
