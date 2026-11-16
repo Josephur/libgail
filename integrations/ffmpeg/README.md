@@ -44,9 +44,10 @@ Use FFmpeg's own R'G'B' → X'Y'Z' conversion instead of GAIL's:
 ffmpeg -i film.mkv -r 24 -vf scale=1998:1080,format=xyz12le -c:v libgail j2c/%06d.j2c
 ```
 
-* **Hardware:** CUDA on NVIDIA Turing or newer with driver 580+, otherwise Vulkan on any
-  Vulkan 1.3 GPU, otherwise the CPU; `-backend` and `-gpus list` show what was picked.
-  See [Supported hardware](../../docs/LIBRARY.md#supported-hardware).
+* **Hardware:** CUDA on NVIDIA Maxwell or newer, through the CUDA plugins next to the gail
+  library, otherwise Vulkan on any Vulkan 1.3 GPU, otherwise the CPU; `-backend` and
+  `-gpus list` show what was picked. See
+  [Supported hardware](../../docs/LIBRARY.md#supported-hardware).
 * **Frame rate:** always set `-r` to a DCI rate (24, 25, 30, 48, 50, 60). The bitrate
   limit is per second, so the per-frame budget follows the frame rate. GAIL warns about
   other rates.

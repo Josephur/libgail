@@ -28,6 +28,23 @@ same codestreams as 1.0.1 for the same input and settings.
 * JPEG 2000 outside the DCI profiles (5/3 lossless, other bit depths or component counts,
   several tiles or quality layers, HTJ2K) is recognized and refused, not decoded.
 
+### CUDA backend
+
+* The CUDA backend supports Maxwell, Pascal and Volta GPUs (compute capability 5.0 to
+  7.0) as well as Turing and newer. It is now two plugins next to the gail library, built
+  from the same sources: `gail_cuda12` (CUDA 12.9) for Maxwell, Pascal and Volta, and
+  `gail_cuda13` (CUDA 13.4) for Turing and newer. The shared library itself links no CUDA.
+  Applications ship both files in the library's directory; nothing in the API changes.
+  See [docs/LIBRARY.md](docs/LIBRARY.md#cuda-plugins).
+* `GAIL_BACKEND_AUTO` no longer picks CUDA for a GPU the CUDA backend has no code for, and
+  goes on to Vulkan when CUDA can run none of the GPUs. `GAIL_BACKEND_CUDA` asked for by
+  name fails for such a GPU when the encoder is created, with the reason.
+* `gail-enc --list-devices` shows the plugin that serves each CUDA device, and
+  `gail_version_string()` names the plugins loaded.
+* Build: `GAIL_CUDA13_ROOT` and `GAIL_CUDA12_ROOT` name the two toolkits, and
+  `GAIL_CUDA13_ARCHS` / `GAIL_CUDA12_ARCHS` replace `GAIL_CUDA_ARCHS`. The static library
+  links one backend in, as before.
+
 ### Tools
 
 * `gail-dec` decodes a codestream or a directory of them to raw X'Y'Z' frames, times the

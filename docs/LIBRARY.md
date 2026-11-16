@@ -15,27 +15,84 @@ Ready-made integrations:
 
 An encoder created with `GAIL_BACKEND_AUTO` uses CUDA when it finds a usable NVIDIA GPU,
 otherwise Vulkan when it finds a usable GPU of any make, otherwise the CPU. A GPU that
-fails a requirement below is skipped and reported at `GAIL_LOG_WARNING`; only an explicit
+fails a requirement below is skipped and reported in the log: at `GAIL_LOG_INFO` when it
+is a GPU the CUDA plugins cannot run, at `GAIL_LOG_WARNING` otherwise. Only an explicit
 backend with no usable device fails (`GAIL_ERROR_UNSUPPORTED`).
 
 | Backend | Needs | Tested on |
 |---|---|---|
-| **CUDA** | An NVIDIA GPU of the **Turing generation or newer**: GeForce GTX 16 / RTX 20, 30, 40, 50, the Quadro / RTX A / RTX PRO and data-center parts from the T4 on. An NVIDIA **driver 580 or newer** (what CUDA 13 requires). Nothing else: the CUDA runtime is inside the library. | RTX 3090 (Ampere), RTX 5060 Ti (Blackwell), Linux; MSVC build on Windows |
+| **CUDA** | An NVIDIA GPU of the **Maxwell generation or newer** (compute capability 5.0 and up): GeForce GTX 750 Ti / 900 / 10 / 16 and RTX 20, 30, 40, 50, the Quadro / RTX A / RTX PRO and data-center parts of those generations. The [CUDA plugin](#cuda-plugins) for the GPU's generation next to the library, and the **NVIDIA driver** that plugin needs. Nothing else: each plugin has its CUDA runtime inside. | RTX 3090 (Ampere), RTX 5060 Ti (Blackwell), Linux; MSVC build on Windows |
 | **Vulkan** | A GPU with a **Vulkan 1.3** driver and a compute queue, 32-wide subgroups (or subgroup size control that allows 32, as AMD's wave64 parts offer), and the core features `shaderInt64`, `shaderInt16`, `shaderInt8`, 8- and 16-bit storage buffers, `bufferDeviceAddress`, `timelineSemaphore` and `synchronization2`. NVIDIA: Pascal (GTX 10) or newer. AMD RDNA and Intel Arc / Xe drivers advertise all of this. `VK_EXT_memory_budget` and `VK_EXT_pci_bus_info` are used when present (frames-in-flight sizing, device IDs). | RTX 3090 and RTX 5060 Ti, Linux and Windows (under Wine). **AMD and Intel are untested**: the shaders use only core Vulkan 1.3, so they are expected to work; reports welcome |
 | **CPU** | Any x86-64 or arm64 CPU. Multithreaded reference implementation, bit-exact with the GPU backends. | Linux, Windows, macOS |
 
-* **Older NVIDIA GPUs or drivers.** Maxwell, Pascal and Volta (GTX 900 / 10, TITAN V) and
-  drivers before 580 cannot run CUDA 13, so the library uses them through Vulkan, at
-  roughly half the CUDA throughput at 4K. Driver 580 is the last series for Pascal.
-* **CUDA architectures.** The library carries native code for sm_75 (Turing), sm_86
+* **Older NVIDIA drivers, missing plugins.** A GPU whose plugin is not next to the
+  library, or whose driver is too old for that plugin, is not a CUDA device. It is used
+  through Vulkan, which is slower (about half the CUDA throughput at 4K on the GPUs of
+  [BENCHMARKS.md](BENCHMARKS.md)). See [CUDA plugins](#cuda-plugins).
+* **CUDA architectures.** `gail_cuda13` carries native code for sm_75 (Turing), sm_86
   (Ampere GeForce), sm_89 (Ada) and sm_120 (Blackwell GeForce), plus PTX for each, so other
   supported parts (A100, Hopper, data-center Blackwell) compile the PTX on first use, which
-  takes a few seconds once per driver. `GAIL_CUDA_ARCHS` changes the list at build time.
+  takes a few seconds once per driver. `gail_cuda12` carries sm_50 and sm_52 (Maxwell),
+  sm_60 and sm_61 (Pascal) and sm_70 (Volta). `GAIL_CUDA13_ARCHS` and `GAIL_CUDA12_ARCHS`
+  change the lists at build time.
 * **Device memory.** One frame in flight takes about 0.7 GB at 4K and 0.2 GB at 2K; the
   encoder starts as many as fit (3 by default) and runs with one if that is all there is,
   so a 2 GB card works at 4K, slowly. See "Device memory and frames in flight" below.
 * **macOS** is CPU-only until the Vulkan backend has been tried on MoltenVK (see
   "Building: macOS").
+
+### CUDA plugins
+
+The shared library links no CUDA. The CUDA backend is built once per CUDA toolkit, each
+time into a plugin, a shared library of its own with that toolkit's runtime inside, which
+libgail loads at run time. There are two because CUDA 13 no longer builds for the GPU
+generations before Turing: Maxwell, Pascal and Volta GPUs use the CUDA 12.9 plugin, Turing
+and newer the CUDA 13.4 plugin.
+
+| Plugin file, Windows / Linux | CUDA toolkit | GPU generations | Compute capability | Example cards | Minimum NVIDIA driver, Windows | Minimum NVIDIA driver, Linux |
+|---|---|---|---|---|---|---|
+| `gail_cuda12.dll` / `libgail_cuda12.so` | 12.9 | Maxwell, Pascal, Volta | 5.0 – 7.0 | GTX 750 Ti, GTX 950 – 980 Ti, GT 1030, GTX 1050 – 1080 Ti, Titan X / Xp / V, Quadro M and P series, Tesla M40, P4, P40, P100, V100 | 576.57 | 575.57.08 |
+| `gail_cuda13.dll` / `libgail_cuda13.so` | 13.4 | Turing, Ampere, Ada, Blackwell | 7.5 and up | GTX 1650 – 1660 Ti, RTX 20, 30, 40 and 50 series, Quadro RTX, RTX A and RTX PRO series, T4 | 580 | 580 |
+
+* **One plugin per GPU.** Which plugin a GPU gets is fixed by its generation: compute
+  capability 7.5 and up is `gail_cuda13`, anything older `gail_cuda12`. Neither stands in
+  for the other. The GTX 16 series is Turing, so it uses `gail_cuda13`. With GPUs of both
+  kinds in one machine, both plugins run side by side in one encoder.
+* **Drivers.** The table gives the versions from NVIDIA's CUDA Toolkit release notes: the
+  driver that goes with CUDA 12.9 (Update 1), and the oldest driver CUDA 13.x applications
+  run on. NVIDIA has named R580 as the last driver branch for Maxwell, Pascal and Volta;
+  those GPUs stay on a 580-series driver, which runs `gail_cuda12`. With a driver too old
+  for a plugin, the plugin's CUDA runtime does not start and CUDA does not offer its GPUs.
+* **Falling back.** A GPU that no plugin can run, a plugin file that is missing, and a
+  machine with no NVIDIA driver are not errors. `GAIL_BACKEND_AUTO` uses CUDA for the GPUs
+  it can run. When it can run none of them, or not every GPU named in `device_ids`, the
+  GPUs are used through Vulkan (see the Vulkan row above for what that needs), and
+  without a usable GPU the CPU does the work. An encoder uses one backend, so next to GPUs
+  that CUDA runs, a GPU it cannot run is left out. What was left out, and why, is logged
+  at `GAIL_LOG_INFO`. Only `GAIL_BACKEND_CUDA` asked for by name fails, with
+  `GAIL_ERROR_UNSUPPORTED` and the reason in `gail_last_error()`.
+  Which backend runs changes the speed, not the encoder: the CUDA plugins, Vulkan and the
+  CPU all write DCI-compliant codestreams, and their Tier-1 coding is bit-identical (see
+  [VALIDATION.md](VALIDATION.md)).
+* **Shipping.** Applications ship both plugin files in the same directory as the gail
+  library: `gail_cuda13.dll` and `gail_cuda12.dll` next to `gail.dll`,
+  `libgail_cuda13.so` and `libgail_cuda12.so` next to `libgail.so`. That directory is the
+  only place the library looks; the `PATH`, the working directory and the system's library
+  search order play no part. The release archives hold them there already (`bin/` on
+  Windows, `lib/` on Linux). The MinGW-w64 and macOS builds have no CUDA backend and no
+  plugins.
+* **Checking.** `gail-enc --list-devices` shows which plugin serves each GPU, which
+  plugins are loaded, and any GPU CUDA cannot use, with the reason.
+  `gail_version_string()` names the plugins loaded, as in
+  `1.1.0 (cuda vulkan cpu; gail_cuda13 gail_cuda12)`.
+* **Listing devices.** Before a GPU is offered as a CUDA device, its plugin loads its
+  kernels on it, which is what tells whether they can run there. So the first
+  `gail_enumerate_devices()` of a process that reaches CUDA takes about a tenth of a second
+  per NVIDIA GPU and leaves a CUDA context on each (about 130 MB of device memory); later
+  calls answer from that.
+* **Static library.** `libgail.a` cannot carry plugins, so it has one backend linked in:
+  the CUDA 13 one when the build had both toolkits. It serves the GPUs that backend has
+  code for.
 
 ## Building
 
@@ -52,6 +109,8 @@ This installs:
 
 * `include/gail/gail.h`;
 * `lib/libgail.so.<version>`, `libgail.a`;
+* `lib/libgail_cuda13.so`, `lib/libgail_cuda12.so`, the [CUDA plugins](#cuda-plugins), for
+  each CUDA toolkit the build had;
 * `lib/pkgconfig/gail.pc`;
 * `lib/cmake/gail/` (`find_package(gail)`, target `gail::gail`);
 * `gail-enc` and `gail-check`.
@@ -60,24 +119,45 @@ Build requirements:
 
 * a C++20 compiler and CMake ≥ 3.20;
 * the Vulkan headers and `glslc` for the Vulkan backend;
-* the CUDA toolkit for the optional CUDA backend.
+* for the optional CUDA backend, the CUDA 13 toolkit (the `gail_cuda13` plugin), the CUDA
+  12.9 toolkit (`gail_cuda12`), or both.
 
 At run time, `libgail.so` needs only the C/C++ runtime:
 
 * It opens the Vulkan loader itself when one is present.
-* It links the CUDA runtime statically, so it needs only the NVIDIA driver. CUDA 13
-  needs driver 580 or newer and a Turing or newer GPU (GTX 16 / RTX 20 and later; the
-  kernels are built for sm_75, 86, 89 and 120 with PTX for the rest). Older NVIDIA GPUs,
-  and older drivers, are used through Vulkan instead.
+* It loads the [CUDA plugins](#cuda-plugins) that are in its own directory. Each has its
+  CUDA runtime linked in statically, so CUDA needs only the NVIDIA driver. Without a
+  plugin for a GPU, or with too old a driver, Vulkan is used instead.
 * Without a usable GPU it falls back to the CPU.
 
 | CMake option | Default | |
 |---|---|---|
 | `GAIL_BUILD_SHARED` / `GAIL_BUILD_STATIC` | ON / ON | which libraries to build |
 | `GAIL_ENABLE_VULKAN` | ON | Vulkan backend (NVIDIA, AMD, Intel) |
-| `GAIL_ENABLE_CUDA` | AUTO | CUDA backend (NVIDIA), if `nvcc` is found |
+| `GAIL_ENABLE_CUDA` | AUTO | CUDA backend (NVIDIA), if a CUDA toolkit is found |
+| `GAIL_CUDA13_ROOT`, `GAIL_CUDA12_ROOT` | | the CUDA 13 and CUDA 12.9 toolkits to build `gail_cuda13` and `gail_cuda12` with |
+| `GAIL_CUDA13_ARCHS`, `GAIL_CUDA12_ARCHS` | `75;86;89;120`, `50;52;60;61;70` | CUDA architectures of each plugin |
+| `GAIL_CUDA12_HOST_COMPILER` | | a C++ compiler for `gail_cuda12`, when CUDA 12.9 does not accept the project's |
 | `GAIL_BUILD_TOOLS`, `GAIL_BUILD_TESTS` | ON | command-line tools and tests |
 | `GAIL_NATIVE_ARCH` | OFF | `-march=native`, for builds that only run on this machine |
+
+**Both CUDA plugins.** With neither `GAIL_CUDA13_ROOT` nor `GAIL_CUDA12_ROOT` set, the
+toolkit CMake finds (`nvcc` on the `PATH`, `CUDA_PATH`, `CMAKE_CUDA_COMPILER`) is used, and
+builds the one plugin it is for. To build both, name the two toolkits. `ci/fetch_cuda.py`
+fetches what is needed of either:
+
+```bash
+python3 ci/fetch_cuda.py cuda13 --manifest 13.4.3
+python3 ci/fetch_cuda.py cuda12 --manifest 12.9.2
+cmake -S . -B build -DGAIL_CUDA13_ROOT=$PWD/cuda13 -DGAIL_CUDA12_ROOT=$PWD/cuda12
+```
+
+* The plugins are built from the same sources, `src/cuda/*.cu`, and end up next to
+  `libgail.so` in the build tree and in `lib/` when installed.
+* CUDA 12.9 accepts GCC up to version 14. On a system whose compiler is newer, give the
+  CUDA 12.9 plugin an older one with `-DGAIL_CUDA12_HOST_COMPILER=g++-14`; the rest of the
+  build keeps the system's compiler.
+* The static library links the CUDA 13 backend when both toolkits are there.
 
 ### Windows
 
@@ -106,15 +186,20 @@ SDK 1.4, and CUDA 13.4:
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 set VULKAN_SDK=C:\VulkanSDK
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAIL_ENABLE_CUDA=ON ^
-      -DCMAKE_CUDA_COMPILER=%CUDA_PATH%/bin/nvcc.exe -DCUDAToolkit_ROOT=%CUDA_PATH%
+      -DGAIL_CUDA13_ROOT=C:/cuda13 -DGAIL_CUDA12_ROOT=C:/cuda12
 cmake --build build
 ctest --test-dir build
 ```
 
-* **CUDA:** either the full toolkit installer or NVIDIA's redistributable zips work. With
-  the zips, unpack `cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm` and `cccl` into one
-  folder. CMake's CUDA package needs `cccl`'s headers, even though GAIL does not use them.
-* **Output:** `gail.dll` (import library `gail.lib`) and the static `gail_static.lib`.
+* **CUDA:** `GAIL_CUDA13_ROOT` and `GAIL_CUDA12_ROOT` are a CUDA 13 and a CUDA 12.9
+  toolkit, each built into its [plugin](#cuda-plugins); with only one of them, only that
+  plugin is built. Either the full toolkit installer or NVIDIA's redistributable zips work
+  (`ci/fetch_cuda.py` fetches and unpacks the zips). By hand, unpack `cuda_nvcc`,
+  `cuda_cudart`, `cuda_crt`, `libnvvm` and `cccl` of CUDA 13 into one folder, and
+  `cuda_nvcc`, `cuda_cudart` and `cuda_cccl` of CUDA 12.9 into another. CMake's CUDA
+  package needs the `cccl` headers, even though GAIL does not use them.
+* **Output:** `gail.dll` (import library `gail.lib`), the plugins `gail_cuda13.dll` and
+  `gail_cuda12.dll` next to it, and the static `gail_static.lib`.
 * **Exports:** the DLL exports only the `gail_*` functions.
 * **Dependencies:** Windows itself and the standard Visual C++ runtime (`MSVCP140` /
   `VCRUNTIME140`, from the Visual C++ Redistributable).
@@ -146,9 +231,9 @@ request:
 
 | Job | Runner | Builds | Tests |
 |---|---|---|---|
-| `linux` | Ubuntu 24.04, GCC | CUDA + Vulkan + CPU | both suites; install, then a program built against the installed library through pkg-config |
+| `linux` | Ubuntu 24.04, GCC | CUDA (both plugins) + Vulkan + CPU | both suites; both plugins load; install, then a program built against the installed library through pkg-config, which finds the plugins |
 | `sanitize` | Ubuntu 24.04, GCC with AddressSanitizer and UndefinedBehaviorSanitizer | CPU | the decoder's tests, damaged codestreams among them, and the API test |
-| `windows-msvc` | Windows Server 2022, MSVC | CUDA + Vulkan + CPU | both suites; install |
+| `windows-msvc` | Windows Server 2022, MSVC | CUDA (both plugins) + Vulkan + CPU | both suites; both plugins load; install |
 | `windows-mingw` | Ubuntu 24.04, MinGW-w64 cross | Vulkan + CPU | both suites under Wine |
 | `macos` | macOS 15, Apple clang (arm64) | CPU | both suites; install, then a pkg-config consumer |
 | `ffmpeg` | Ubuntu 24.04 | FFmpeg with the `libgail` encoder and decoder | encodes a test pattern, which `gail-check` verifies; decodes it again and compares with FFmpeg's own decoder |
@@ -157,10 +242,12 @@ request:
   tests run on the CPU backend, and the GPU tests skip themselves. GPU coverage comes from
   running `ctest` on a machine with GPUs.
 * **CUDA:** `ci/fetch_cuda.py` downloads just the CUDA parts needed to compile (NVIDIA's
-  redistributable archives, checked against the SHA-256 in NVIDIA's manifest). This needs
-  no installer and no driver, and also works for local builds.
-* **Pinned versions:** CUDA 13.4.92, Vulkan SDK 1.4.363.0 and FFmpeg n9.0.2, set at the top
-  of the workflow. Downloads are cached between runs.
+  redistributable archives, checked against the SHA-256 in NVIDIA's manifest), once for
+  CUDA 13 and once for CUDA 12.9. This needs no installer and no driver, and also works
+  for local builds. The plugins' loader is tested with stand-in plugins that need no GPU
+  (`gail-tests plugins`).
+* **Pinned versions:** CUDA 13.4.92 and 12.9.86, Vulkan SDK 1.4.363.0 and FFmpeg n9.0.2, set
+  at the top of the workflow. Downloads are cached between runs.
 * **Artifacts:** each build job uploads its installed library (Linux, Windows MSVC,
   Windows MinGW, macOS).
 
@@ -170,6 +257,9 @@ request:
 cc app.c $(pkg-config --cflags --libs gail)          # shared
 cc app.c $(pkg-config --cflags --libs --static gail)  # static (same header on every platform)
 ```
+
+An application linked against the shared library ships the [CUDA plugins](#cuda-plugins)
+next to it. The static library has one CUDA backend linked in and needs no plugins.
 
 ### Versions
 
@@ -237,7 +327,7 @@ Vulkan, else the CPU). To let users choose:
 
 ```c
 gail_device_info devs[16];
-int n = gail_enumerate_devices(GAIL_BACKEND_AUTO, devs, 16);  /* cheap: nothing is set up */
+int n = gail_enumerate_devices(GAIL_BACKEND_AUTO, devs, 16);  /* cheap: no encoder is set up */
 for (int i = 0; i < n && i < 16; ++i)
     printf("%s  %s  %s  %.0f GB\n", devs[i].name, devs[i].uuid, devs[i].pci_bus_id,
            devs[i].memory_bytes / 1073741824.0);
@@ -257,7 +347,10 @@ cfg.num_device_ids = 1;
 * **Unknown IDs:** creating an encoder with one fails with `GAIL_ERROR_UNSUPPORTED`, and
   `gail_last_error()` lists the available devices.
 * **As text:** `gail_list_devices()` returns the same list as text, and
-  `gail-enc --list-devices` prints it.
+  `gail-enc --list-devices` prints it, with the [CUDA plugin](#cuda-plugins) that serves
+  each NVIDIA GPU.
+* **GPUs CUDA cannot run** are not among the CUDA devices. When CUDA can run none,
+  `GAIL_BACKEND_AUTO` lists the GPUs, and uses them, through Vulkan.
 
 ## Device memory and frames in flight
 
