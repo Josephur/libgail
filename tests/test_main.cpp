@@ -2081,12 +2081,12 @@ static void testDecodeCpu(Profile prof) {
         ds.reduce = reduce;
         std::vector<CblkCode> low;
         CHECK(parsePackets(f.cs.data(), h, L, L.levels - reduce, low, err), "packets: %s", err.c_str());
-        auto small = createCpuDecoderSlot(L, ds, pool);
+        auto narrowSlot = createCpuDecoderSlot(L, ds, pool);
         int w, hh;
         decodedSize(L, reduce, w, hh);
         CHECK(w == (W + (1 << reduce) - 1) >> reduce && hh == (H + (1 << reduce) - 1) >> reduce, "reduced size %dx%d", w, hh);
         std::vector<uint16_t> got((size_t)w * hh * 3), want((size_t)w * hh * 3);
-        small->decode(L, f.cs.data(), f.cs.size(), low, got.data(), (ptrdiff_t)w * 6, nullptr);
+        narrowSlot->decode(L, f.cs.data(), f.cs.size(), low, got.data(), (ptrdiff_t)w * 6, nullptr);
         for (int y = 0; y < hh; ++y)
             for (int x = 0; x < w; ++x) {
                 // the low-pass band sits in the top-left corner of the full-width plane

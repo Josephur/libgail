@@ -615,9 +615,9 @@ static void test_decoder(void) {
         gail_image_free(&img);
 
         /* a caller's buffer that is too narrow, reserved words, an empty packet */
-        uint8_t* small = (uint8_t*)malloc((size_t)w * h * 6);
+        uint8_t* ownBuf = (uint8_t*)malloc((size_t)w * h * 6);
         memset(&img, 0, sizeof img);
-        img.data[0] = small;
+        img.data[0] = ownBuf;
         img.stride[0] = (ptrdiff_t)w * 6 - 2;
         CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_ERROR_INVALID && strstr(gail_last_error(), "stride"),
               "short stride accepted");
@@ -625,12 +625,12 @@ static void test_decoder(void) {
         img.reserved[0] = 1;
         CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_ERROR_INVALID, "non-zero gail_image.reserved accepted");
         img.reserved[0] = 0;
-        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_OK && img.data[0] == small && img.stride[0] == (ptrdiff_t)w * 6 &&
-                  memcmp(small, frame0, (size_t)w * h * 6) == 0,
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_OK && img.data[0] == ownBuf && img.stride[0] == (ptrdiff_t)w * 6 &&
+                  memcmp(ownBuf, frame0, (size_t)w * h * 6) == 0,
               "decode into the caller's buffer: %s", gail_last_error());
         gail_image_free(&img); /* not the library's: must leave it alone */
-        CHECK(img.data[0] == small, "gail_image_free touched the caller's buffer");
-        free(small);
+        CHECK(img.data[0] == ownBuf, "gail_image_free touched the caller's buffer");
+        free(ownBuf);
         gail_packet bad = s.pkt[0];
         bad.reserved[1] = 1;
         memset(&img, 0, sizeof img);
