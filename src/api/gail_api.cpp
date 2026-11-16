@@ -32,6 +32,15 @@
 #include "core/pipeline.h"
 #include "core/t2.h"
 
+namespace gail::api {
+
+std::string& lastError() {
+    thread_local std::string error = "no error";
+    return error;
+}
+
+}  // namespace gail::api
+
 namespace {
 
 using namespace gail;
@@ -447,7 +456,7 @@ std::vector<DeviceInfo> enumerate(gail_backend backend, gail_backend& chosen) {
 
 extern "C" {
 
-const char* gail_last_error(void) { return g_lastError.c_str(); }
+const char* gail_last_error(void) { return lastError().c_str(); }
 
 const char* gail_status_string(int s) {
     switch (s) {
@@ -575,7 +584,7 @@ int gail_encoder_create(const gail_config* c, gail_encoder** encoder) {
         if (!(cfg.max_mbps > 0) || cfg.max_mbps > 250)
             throw ApiError(GAIL_ERROR_INVALID, "max_mbps must be in (0, 250] (the DCI bitrate limit)");
         if (gail_container_size(cfg.profile, cfg.container, &e->width, &e->height) != GAIL_OK)
-            throw ApiError(GAIL_ERROR_INVALID, g_lastError);
+            throw ApiError(GAIL_ERROR_INVALID, lastError());
         const gail_input& in = cfg.input;
         if (enumValue(in.format) < 0 || enumValue(in.format) > GAIL_PIX_GBRP16 ||
             (!isPlanar(in.format) && in.format != GAIL_PIX_RGB48 && !isXyz(in.format)))

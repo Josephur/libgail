@@ -10,10 +10,13 @@
 
 namespace gail::api {
 
-inline thread_local std::string g_lastError = "no error";
+// The calling thread's last error (gail_last_error()). A function defined in one place
+// rather than an inline thread_local variable: MinGW-w64's GCC emits the initialization
+// of such a variable in every translation unit that uses it, and the link fails.
+std::string& lastError();
 
 inline int fail(int status, const std::string& msg) {
-    g_lastError = msg;
+    lastError() = msg;
     return status;
 }
 

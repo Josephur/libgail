@@ -356,7 +356,7 @@ struct gail_decoder {
             fill(img, *job);
             img.reserved[2] = img.reserved[3] = 0;  // valid during the call only: nothing for the app to release
             l.unlock();
-            if (job->status != GAIL_OK) g_lastError = job->error;
+            if (job->status != GAIL_OK) lastError() = job->error;
             cfg.on_image(cfg.user, &img);
             l.lock();
         }
@@ -427,7 +427,7 @@ int gail_probe(const void* data, size_t size, gail_stream_info* info) {
     info->tiles = h.tiles;
     info->layers = h.layers;
     info->supported = h.supported;
-    if (!h.supported) g_lastError = "unsupported codestream: " + h.unsupported;
+    if (!h.supported) lastError() = "unsupported codestream: " + h.unsupported;
     return GAIL_OK;
 }
 
@@ -551,7 +551,7 @@ int gail_decoder_send(gail_decoder* d, const gail_packet* pkt, const gail_image*
             job->cs.assign(pkt->data, pkt->data + pkt->size);
         } else {
             job->status = setUp;
-            job->error = g_lastError;
+            job->error = lastError();
         }
         std::unique_lock<std::mutex> l(d->m);
         if (d->ended) return fail(GAIL_ERROR_STATE, "send after the end of the stream");
@@ -587,7 +587,7 @@ int gail_decoder_receive(gail_decoder* d, gail_image* img, int wait) {
     d->ready.erase(d->nextOut++);
     d->fill(*img, *job);
     job->ownedDst = false;  // the app's now, through the image
-    if (job->status != GAIL_OK) g_lastError = job->error;
+    if (job->status != GAIL_OK) lastError() = job->error;
     return GAIL_OK;
 }
 
