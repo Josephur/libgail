@@ -1,0 +1,55 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Horizontal 9/7 synthesis of one row per workgroup: dwt_rows.comp backwards. Reads the
+// low|high halves of a row of src, writes the interleaved, reconstructed row to dst.
+#include "common.glsl"
+#define GAIL_GLSL 1
+#include "kernels/dwt97.h"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint64_t src;
+    uint64_t dst;
+    uint stride;       // plane width
+    uint planeSize;    // width * height
+    uint w, h;         // extent being reconstructed
+};
+
+shared float row[4096];
+
+const float K = float(DWT97_K);
+
+int mirror(int i, int n) {
+    if (i < 0) return -i;
+    if (i >= n) return 2 * (n - 1) - i;
+    return i;
+}
+
+void lift(int parity, float c, int n) {
+    for (int i = int(gl_LocalInvocationID.x) * 2 + parity; i < n; i += 512)
+        row[i] += c * (row[mirror(i - 1, n)] + row[mirror(i + 1, n)]);
+    barrier();
+}
+
+void main() {
+    uint y = gl_WorkGroupID.x;
+    uint comp = gl_WorkGroupID.y;
+    F32Buf S = F32Buf(src);
+    F32Buf D = F32Buf(dst);
+    uint base = comp * planeSize + y * stride;
+    int n = int(w);
+    if (n == 1) {
+        if (gl_LocalInvocationID.x == 0u) D.v[base] = S.v[base];
+        return;
+    }
+    uint sn = (w + 1u) / 2u;
+    for (uint i = gl_LocalInvocationID.x; i < w; i += 256u)
+        row[i] = (i & 1u) == 0u ? S.v[base + i / 2u] * K : S.v[base + sn + i / 2u] * (1.0 / K);
+    barrier();
+    lift(0, float(-(DWT97_DELTA)), n);
+    lift(1, float(-(DWT97_GAMMA)), n);
+    lift(0, float(-(DWT97_BETA)), n);
+    lift(1, float(-(DWT97_ALPHA)), n);
+    for (uint i = gl_LocalInvocationID.x; i < w; i += 256u) D.v[base + i] = row[i];
+}

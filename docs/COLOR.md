@@ -1,7 +1,7 @@
-# Colour handling
+# Color handling
 
 GAIL turns source pictures into 12-bit DCI X'Y'Z' (SMPTE ST 428-1) before the wavelet
-transform. Everything here runs on the GPU in the colour kernel, from one shared source,
+transform. Everything here runs on the GPU in the color kernel, from one shared source,
 [src/kernels/color_math.h](../src/kernels/color_math.h). It is compiled as C++ (CPU
 reference), CUDA and GLSL, and `gail-tests` checks all three against each other in every
 mode. Results agree to within one code value.
@@ -12,8 +12,8 @@ and `gail-enc` exposes the same options as flags.
 | Mode | Use when | API | `gail-enc` |
 |---|---|---|---|
 | Managed | the source is video (SDR or HDR) and GAIL should do the conversion | `GAIL_COLOR_MANAGED` + a preset | default |
-| X'Y'Z' pass-through | the app already converted to X'Y'Z' (e.g. DCP-o-matic's own colour pipeline, a DI deliverable) | `input.format = GAIL_PIX_XYZ12` / `_MSB` | `--xyz-dir DIR` |
-| 3D LUT | the app or colourist has a LUT from source R'G'B' to X'Y'Z' | `GAIL_COLOR_LUT3D` (in memory) | `--lut3d FILE.cube` |
+| X'Y'Z' pass-through | the app already converted to X'Y'Z' (e.g. DCP-o-matic's own color pipeline, a DI deliverable) | `input.format = GAIL_PIX_XYZ12` / `_MSB` | `--xyz-dir DIR` |
+| 3D LUT | the app or colorist has a LUT from source R'G'B' to X'Y'Z' | `GAIL_COLOR_LUT3D` (in memory) | `--lut3d FILE.cube` |
 
 Pass-through is exact: every 12-bit code survives unchanged (tested for all 4096 codes).
 
@@ -36,8 +36,8 @@ tone map.
 By default, PQ and HLG are handled the way DCP-o-matic handles them. DCP-o-matic does not
 tone-map: libdcp's RGB → XYZ conversion reads the HDR signal as if it were gamma 2.4 video,
 with code 1.0 at 48 cd/m² (`--tonemap signal`, `GAIL_TONE_MAP_SIGNAL`). The result is
-dimmer and flatter than a true HDR rendering, but no highlight is crushed and no colour
-glows, so it is a safe default for apps that pass no colour settings of their own.
+dimmer and flatter than a true HDR rendering, but no highlight is crushed and no color
+glows, so it is a safe default for apps that pass no color settings of their own.
 
 Apps that want an actual HDR rendering can pick a tone curve:
 
@@ -52,27 +52,27 @@ Apps that want an actual HDR rendering can pick a tone curve:
 
 ### What the curve is applied to (shoulder / BT.2390)
 
-| `tone_norm` / `--tone-norm` | Bright saturated colours | Notes |
+| `tone_norm` / `--tone-norm` | Bright saturated colors | Notes |
 |---|---|---|
 | `channel` (default) | drift toward white as each channel nears the peak | how film and SDR grades render them; keeps texture in highlights |
 | `maxrgb` | keep hue and saturation exactly | bright warm light stays deep orange; can look over-saturated |
 | `luminance` | keep luminance, so the gamut stage bleaches them to white | washes out detail in bright, saturated scenes |
 
 Neutrals are identical in all three modes. Out-of-gamut (negative) channels are scaled
-with the brightest channel, so an out-of-gamut colour shrinks in proportion instead of
+with the brightest channel, so an out-of-gamut color shrinks in proportion instead of
 being pulled toward black.
 
 ### Gamut
 
 By default there is no gamut stage, as in DCP-o-matic: X'Y'Z' can hold every source
-colour, and the projector maps what it cannot show. With `--gamut p3d65` or `dcip3`,
-colours outside that gamut are not clipped per channel. They are moved toward the neutral of the same luminance, and only as
+color, and the projector maps what it cannot show. With `--gamut p3d65` or `dcip3`,
+colors outside that gamut are not clipped per channel. They are moved toward the neutral of the same luminance, and only as
 far as needed. Compression starts at `gamut_threshold` (0.8) of the way to the gamut edge
 and rolls off smoothly, so texture inside saturated areas survives.
 
 ## Choosing the defaults
 
-Defaults matter for apps that pass no colour information, so they follow the established
+Defaults matter for apps that pass no color information, so they follow the established
 tool. Test clip: 4K PQ BT.2020 HDR10, mastering peak 2000 cd/m², compared frame by frame
 with DCP-o-matic's 2K DCP of the same clip.
 
@@ -93,7 +93,7 @@ gail_config cfg;
 gail_config_defaults(&cfg);
 cfg.profile = GAIL_PROFILE_4K;
 cfg.input.format = GAIL_PIX_YUV420P10;       /* or GAIL_PIX_RGB48 */
-cfg.input.width = 3840;                      /* centred in the 3996x2160 container */
+cfg.input.width = 3840;                      /* centered in the 3996x2160 container */
 cfg.input.height = 2160;
 cfg.input.matrix = GAIL_MATRIX_BT2020;
 gail_color_preset(GAIL_PRESET_HDR_PQ_BT2020, &cfg.color);  /* DCP-o-matic-like */
@@ -105,7 +105,7 @@ gail_encoder* enc;
 if (gail_encoder_create(&cfg, &enc) != GAIL_OK) { puts(gail_last_error()); return; }
 ```
 
-An app with its own colour pipeline (DCP-o-matic converts to X'Y'Z' itself) sets
+An app with its own color pipeline (DCP-o-matic converts to X'Y'Z' itself) sets
 `cfg.input.format = GAIL_PIX_XYZ12` (codes in the low bits, as libdcp produces them) or
 `GAIL_PIX_XYZ12_MSB` (FFmpeg's `xyz12le`). The codes are then encoded exactly and
 `cfg.color` is not used. `gail_color_describe()` returns the same one-line summary

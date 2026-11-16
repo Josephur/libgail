@@ -11,7 +11,8 @@ upload). For each, this writes OUT_DIR/libgail-<TAG>-<platform>.tar.gz (Linux, m
 * makes gail.pc relocatable: the prefix becomes the directory two levels above the file, and
   the -L paths of the machine that built it are dropped;
 * restores the executable bits and the library symlinks that the artifact upload loses;
-* adds the licence.
+* checks that the builds with a CUDA backend hold both of its plugins next to the library;
+* adds the license.
 """
 import hashlib
 import io
@@ -26,6 +27,13 @@ import time
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# The CUDA backend is two plugins, which the library loads from its own directory. A build
+# that lost one still passes its tests on CI's GPU-less machines, so it is caught here.
+CUDA_PLUGINS = {
+    'linux-x86_64': ['lib/libgail_cuda13.so', 'lib/libgail_cuda12.so'],
+    'windows-x64-msvc': ['bin/gail_cuda13.dll', 'bin/gail_cuda12.dll'],
+}
 
 
 def fix_pc(text):
@@ -61,8 +69,8 @@ def collect(tree):
         if rel.startswith('bin/') or re.search(r'\.(so|dylib)', p.name):
             mode = 0o755
         entries.append((rel, 'file', data, mode))
-    licence = (ROOT / 'LICENSE').read_bytes()
-    entries.append(('LICENSE', 'file', licence, 0o644))
+    license = (ROOT / 'LICENSE').read_bytes()
+    entries.append(('LICENSE', 'file', license, 0o644))
     return entries
 
 
@@ -106,6 +114,10 @@ def main():
         platform = tree.name[len('libgail-'):]
         top = f'libgail-{tag}-{platform}'
         entries = collect(tree)
+        present = {rel for rel, *_ in entries}
+        missing = [p for p in CUDA_PLUGINS.get(platform, []) if p not in present]
+        if missing:
+            sys.exit(f'{tree.name}: no {", ".join(missing)}')
         if platform.startswith('windows'):
             archive = out / f'{top}.zip'
             write_zip(archive, top, entries, mtime)

@@ -1,14 +1,14 @@
 #version 460
 // SPDX-License-Identifier: MIT
-// EBCOT Tier-1 context modelling on the GPU.
+// EBCOT Tier-1 context modeling on the GPU.
 //
 // One 32-lane subgroup codes one 32x32 code-block; lane x owns column x and keeps
 // the column's significance / sign / refinement / visited state as 32-bit row
-// masks in registers. Neighbour columns are fetched with subgroup shuffles.
+// masks in registers. Neighbor columns are fetched with subgroup shuffles.
 //
 // Within a pass, the scan order (stripes of 4 rows, column by column) makes the
 // significance propagation pass causal: a coefficient may become eligible because
-// a neighbour earlier in the scan became significant in the same pass. That
+// a neighbor earlier in the scan became significant in the same pass. That
 // dependency is resolved per stripe as a monotone fixpoint over the 32 columns
 // (usually 1-2 iterations). The magnitude refinement and cleanup passes have no
 // such dependency: their coded sets follow directly from the masks, and contexts
@@ -32,7 +32,7 @@
 layout(local_size_x = 128) in;
 
 layout(push_constant) uniform PC {
-    uint64_t planes;    // F32Buf wavelet planes: the shader quantises its block itself
+    uint64_t planes;    // F32Buf wavelet planes: the shader quantizes its block itself
     uint64_t cblkTab;   // U32Buf, 4 words per code-block
     uint64_t info;      // U32Buf, 4 words per code-block (nbps, passes, offset, len)
     uint64_t passEnd;   // U32Buf [cb * MAX_PASSES + k] cumulative symbol count
@@ -157,7 +157,7 @@ void main() {
 
     uint sgn = 0u, colMax = 0u;
     {
-        // dead-zone quantisation of this block (same arithmetic as quantize.comp)
+        // dead-zone quantization of this block (same arithmetic as quantize.comp)
         uint band = T.v[4u * cb], ax = T.v[4u * cb + 1u], ay = T.v[4u * cb + 2u];
         U32Buf B = U32Buf(bandTab);
         float inv = uintBitsToFloat(B.v[4u * band]);

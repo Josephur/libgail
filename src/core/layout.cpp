@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core/dwt_cpu.h"
+#include "kernels/ict.h"
 
 namespace gail {
 
@@ -50,25 +51,36 @@ double synthesisNorm(int level, int orient) {
 }
 
 double ictSynthesisNorm(int comp) {
-    // Inverse ICT (Annex G.3): R = Y + 1.402 Cr; G = Y - 0.34413 Cb - 0.71414 Cr; B = Y + 1.772 Cb
-    static const double cols[3][3] = {{1, 1, 1}, {0, -0.34413, 1.772}, {1.402, -0.71414, 0}};
+    // Columns of the inverse ICT (kernels/ict.h): what one unit of each component adds to R, G, B
+    static const double cols[3][3] = {{1, 1, 1}, {0, ICT_G_Y1, ICT_B_Y1}, {ICT_R_Y2, ICT_G_Y2, 0}};
     double e = 0;
     for (int i = 0; i < 3; ++i) e += cols[comp][i] * cols[comp][i];
     return std::sqrt(e);
 }
 
-FrameLayout makeLayout(int width, int height, Profile profile, double baseStep) {
+namespace {
+
+// Rb of E.1: the component's bit depth plus the subband's gain (0 LL, 1 HL / LH, 2 HH).
+int nominalRange(const Subband& b) { return kBitDepth + (b.orient == 0 ? 0 : (b.orient == 3 ? 2 : 1)); }
+
+// Step size and bit-plane count from the signaled exponent and mantissa (E.1, E.2).
+void applyStep(Subband& b, int guardBits, int eps, int mu) {
+    b.eps = eps;
+    b.mu = mu;
+    b.delta = (float)(std::ldexp(1.0, nominalRange(b) - eps) * (1.0 + mu / 2048.0));
+    b.Mb = guardBits + eps - 1;
+    if (b.Mb > 22) throw std::runtime_error("quantization step too fine (more than 22 bitplanes)");
+}
+
+}  // namespace
+
+FrameLayout makeGeometry(int width, int height, Profile profile, int levels, int guardBits) {
     FrameLayout L;
     L.profile = profile;
     L.width = width;
     L.height = height;
-    L.baseStep = baseStep;
-    const bool fourk = profile == Profile::Cinema4K;
-    if (fourk ? (width > 4096 || height > 2160) : (width > 2048 || height > 1080))
-        throw std::runtime_error("image size exceeds the DCI container for this profile");
-    if (width < 64 || height < 64) throw std::runtime_error("image too small");
-    L.levels = fourk ? 6 : 5;
-    L.guardBits = fourk ? 2 : 1;
+    L.levels = levels;
+    L.guardBits = guardBits;
 
     const int NL = L.levels;
     std::vector<int> ws(NL + 1), hs(NL + 1);
@@ -100,36 +112,11 @@ FrameLayout makeLayout(int width, int height, Profile profile, double baseStep) 
                 b.ncby = (b.h + kCblkSize - 1) / kCblkSize;
                 b.cblkBase = cblkCount;
                 cblkCount += b.ncbx * b.ncby;
-
-                // Quantization: equal image-domain MSE contribution per coefficient.
-                const double norm = synthesisNorm(n, b.orient);
-                const int gain = b.orient == 0 ? 0 : (b.orient == 3 ? 2 : 1);
-                const int Rb = kBitDepth + gain;
-                double target = baseStep / norm;
-                double x = target / std::ldexp(1.0, Rb);  // = 2^-eps (1 + mu/2^11)
-                int eps = (int)std::ceil(-std::log2(x));
-                if (std::ldexp(x, eps) < 1.0) ++eps;
-                if (std::ldexp(x, eps) >= 2.0) --eps;
-                int mu = (int)std::lround((std::ldexp(x, eps) - 1.0) * 2048.0);
-                if (mu >= 2048) {
-                    mu = 0;
-                    --eps;
-                }
-                if (eps < 0 || eps > 31) throw std::runtime_error("quantization step out of range");
-                b.eps = eps;
-                b.mu = mu;
-                b.delta = (float)(std::ldexp(1.0, Rb - eps) * (1.0 + mu / 2048.0));
-                b.Mb = L.guardBits + eps - 1;
-                if (b.Mb > 22) throw std::runtime_error("quantisation step too fine (more than 22 bitplanes)");
-                const double wc = ictSynthesisNorm(c);
-                b.weight = norm * norm * wc * wc;
                 L.bands.push_back(b);
             }
         }
     }
 
-    // QCD is shared: per-band steps must be identical across components (they are, since
-    // they depend on level/orient only). Component weights only affect rate control.
     L.cblks.resize(cblkCount);
     for (int bi = 0; bi < (int)L.bands.size(); ++bi) {
         const Subband& b = L.bands[bi];
@@ -177,6 +164,47 @@ FrameLayout makeLayout(int width, int height, Profile profile, double baseStep) 
                 }
             L.resolutions.push_back(std::move(R));
         }
+    }
+    return L;
+}
+
+void setSignaledSteps(FrameLayout& L, const int* eps, const int* mu, int comp) {
+    const int nb = L.bandsPerComp();
+    for (int bi = 0; bi < (int)L.bands.size(); ++bi) {
+        if (comp >= 0 && L.bands[bi].comp != comp) continue;
+        const int i = bi % nb;
+        if (eps[i] < 0 || eps[i] > 31 || mu[i] < 0 || mu[i] > 2047) throw std::runtime_error("quantization step out of range");
+        applyStep(L.bands[bi], L.guardBits, eps[i], mu[i]);
+    }
+}
+
+FrameLayout makeLayout(int width, int height, Profile profile, double baseStep) {
+    const bool fourk = profile == Profile::Cinema4K;
+    if (fourk ? (width > 4096 || height > 2160) : (width > 2048 || height > 1080))
+        throw std::runtime_error("image size exceeds the DCI container for this profile");
+    if (width < 64 || height < 64) throw std::runtime_error("image too small");
+    FrameLayout L = makeGeometry(width, height, profile, fourk ? 6 : 5, fourk ? 2 : 1);
+    L.baseStep = baseStep;
+
+    // QCD is shared: per-band steps must be identical across components (they are, since
+    // they depend on level/orient only). Component weights only affect rate control.
+    for (Subband& b : L.bands) {
+        // Quantization: equal image-domain MSE contribution per coefficient.
+        const double norm = synthesisNorm(b.level, b.orient);
+        double target = baseStep / norm;
+        double x = target / std::ldexp(1.0, nominalRange(b));  // = 2^-eps (1 + mu/2^11)
+        int eps = (int)std::ceil(-std::log2(x));
+        if (std::ldexp(x, eps) < 1.0) ++eps;
+        if (std::ldexp(x, eps) >= 2.0) --eps;
+        int mu = (int)std::lround((std::ldexp(x, eps) - 1.0) * 2048.0);
+        if (mu >= 2048) {
+            mu = 0;
+            --eps;
+        }
+        if (eps < 0 || eps > 31) throw std::runtime_error("quantization step out of range");
+        applyStep(b, L.guardBits, eps, mu);
+        const double wc = ictSynthesisNorm(b.comp);
+        b.weight = norm * norm * wc * wc;
     }
     return L;
 }

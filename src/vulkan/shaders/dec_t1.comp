@@ -1,0 +1,60 @@
+#version 460
+// SPDX-License-Identifier: MIT
+// Decoder Tier-1: one invocation per code-block. Decodes the block's coding passes
+// (kernels/t1_decode.h) straight into its place in the wavelet planes, then turns the
+// decoded words into coefficients: magnitude times half the quantization step.
+#include "common.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint64_t bytes;     // U8Buf: the frame's codestream
+    uint64_t descs;     // U32Buf: 6 words per block (see below)
+    uint64_t planes;    // U32Buf / F32Buf: the three wavelet planes, zero on entry
+    uint64_t tables;    // U8Buf: zero-coding contexts (2048), then sign contexts (256)
+    uint nbytes;
+    uint ndesc;
+    uint planeWords;
+    uint stride;        // plane width
+};
+
+#define GAIL_GLSL 1
+uint g_ctx[19];
+#define MQD_IN_T uint
+#define MQD_BYTE(cs, i) uint(U8Buf(bytes).v[(cs) + (i)])
+#define MQD_CTX(d, cx) g_ctx[cx]
+#define T1D_OUT_T uint
+#define T1D_WR(dst, i, word) U32Buf(planes).v[(dst) + ((i) >> 5) * stride + ((i) & 31u)] = (word)
+#define T1D_RD(dst, i) U32Buf(planes).v[(dst) + ((i) >> 5) * stride + ((i) & 31u)]
+#define T1D_ZC(i) uint(U8Buf(tables).v[(i)])
+#define T1D_SC(i) uint(U8Buf(tables).v[2048u + (i)])
+#include "kernels/t1_decode.h"
+
+// Block descriptor: offset and length of its bytes, (w - 1) | (h - 1) << 5 | orient << 10
+// | nbps << 12 | passes << 18, index of its top-left sample in the planes (0xFFFFFFFF: an
+// empty slot), half its band's step as float bits, padding.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= ndesc) return;
+    U32Buf D = U32Buf(descs);
+    uint off = D.v[6u * i], len = D.v[6u * i + 1u], geom = D.v[6u * i + 2u], dst = D.v[6u * i + 3u];
+    if (dst == 0xFFFFFFFFu) return;
+    float halfStep = uintBitsToFloat(D.v[6u * i + 4u]);
+    uint w = (geom & 31u) + 1u, h = ((geom >> 5) & 31u) + 1u, orient = (geom >> 10) & 3u;
+    uint nbps = (geom >> 12) & 63u, passes = (geom >> 18) & 255u;
+    // the host builds the table from the frame's layout; these keep a wrong table inside
+    // the buffers all the same
+    if (dst >= planeWords || planeWords - dst < (h - 1u) * stride + w) return;
+    if (off > nbytes || len > nbytes - off) len = 0u;
+    T1dState st;
+    MqDec q;
+    mqd_init(q, off, 0u, len);
+    t1d_decode_block(st, q, off, w, h, orient, nbps, passes, dst);
+    U32Buf P = U32Buf(planes);
+    for (uint y = 0u; y < h; ++y)
+        for (uint x = 0u; x < w; ++x) {
+            uint v = P.v[dst + y * stride + x];
+            float a = float(v & 0x7FFFFFFFu) * halfStep;
+            P.v[dst + y * stride + x] = floatBitsToUint((v & 0x80000000u) != 0u ? -a : a);
+        }
+}

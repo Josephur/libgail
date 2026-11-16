@@ -19,7 +19,7 @@ inline int mirror(int i, int n) {
 
 // x[i] += coef * (x[i-1] + x[i+1]) for all i with i % 2 == parity (n >= 2). The interior
 // runs without index arithmetic; only the two ends use the symmetric extension, where the
-// mirrored neighbour is x[1] (left) and x[n-2] (right). Same operations in the same order
+// mirrored neighbor is x[1] (left) and x[n-2] (right). Same operations in the same order
 // as the plain mirrored loop, so the results are bit-identical.
 template <typename T> inline void lift(T* x, int n, int parity, T coef) {
     int i = parity;
@@ -89,6 +89,45 @@ void fdwtColumns(float* plane, int width, int h, int x0, int nx, float* strip) {
         const float* src = strip + (size_t)(2 * i + 1) * kStrip;
         float* dst = plane + (size_t)(sn + i) * width + x0;
         for (int k = 0; k < nx; ++k) dst[k] = src[k] * (float)kK;
+    }
+}
+
+// Inverse transform of one row in place (tmp: w floats of scratch): fdwtRow backwards.
+void idwtRow(float* row, int w, float* tmp) {
+    if (w < 2) return;
+    const int sn = (w + 1) / 2;
+    for (int i = 0; i < sn; ++i) tmp[2 * i] = row[i] * (float)kK;
+    for (int i = 0; i < w / 2; ++i) tmp[2 * i + 1] = row[sn + i] * (float)(1.0 / kK);
+    lift<float>(tmp, w, 0, (float)-kDelta);
+    lift<float>(tmp, w, 1, (float)-kGamma);
+    lift<float>(tmp, w, 0, (float)-kBeta);
+    lift<float>(tmp, w, 1, (float)-kAlpha);
+    std::memcpy(row, tmp, sizeof(float) * (size_t)w);
+}
+
+// Inverse transform of columns [x0, x0 + nx) of the top-left w x h region: fdwtColumns
+// backwards.
+void idwtColumns(float* plane, int width, int h, int x0, int nx, float* strip) {
+    if (h < 2) return;
+    const int sn = (h + 1) / 2;
+    for (int i = 0; i < sn; ++i) {
+        const float* src = plane + (size_t)i * width + x0;
+        float* dst = strip + (size_t)(2 * i) * kStrip;
+        for (int k = 0; k < nx; ++k) dst[k] = src[k] * (float)kK;
+    }
+    for (int i = 0; i < h / 2; ++i) {
+        const float* src = plane + (size_t)(sn + i) * width + x0;
+        float* dst = strip + (size_t)(2 * i + 1) * kStrip;
+        for (int k = 0; k < nx; ++k) dst[k] = src[k] * (float)(1.0 / kK);
+    }
+    liftStrip<kStrip>(strip, h, 0, (float)-kDelta);
+    liftStrip<kStrip>(strip, h, 1, (float)-kGamma);
+    liftStrip<kStrip>(strip, h, 0, (float)-kBeta);
+    liftStrip<kStrip>(strip, h, 1, (float)-kAlpha);
+    for (int y = 0; y < h; ++y) {
+        const float* src = strip + (size_t)y * kStrip;
+        float* dst = plane + (size_t)y * width + x0;
+        for (int k = 0; k < nx; ++k) dst[k] = src[k];
     }
 }
 
@@ -169,6 +208,35 @@ void fdwt97_2d(float* const* planes, int nplanes, int width, int height, int lev
 void fdwt97_2d(float* plane, int width, int height, int levels) {
     float* planes[1] = {plane};
     fdwt97_2d(planes, 1, width, height, levels, nullptr);
+}
+
+void idwt97_2d(float* const* planes, int nplanes, int width, int height, int levels, int skip, const ParallelFor* par) {
+    const ParallelFor serial = [](int n, const std::function<void(int)>& f) {
+        for (int i = 0; i < n; ++i) f(i);
+    };
+    const ParallelFor& run = par ? *par : serial;
+    std::vector<int> ws(levels + 1), hs(levels + 1);
+    ws[0] = width;
+    hs[0] = height;
+    for (int l = 1; l <= levels; ++l) {
+        ws[l] = (ws[l - 1] + 1) / 2;
+        hs[l] = (hs[l - 1] + 1) / 2;
+    }
+    for (int l = levels; l > skip; --l) {
+        // the forward transform's steps undone in reverse: rows, then columns
+        const int w = ws[l - 1], h = hs[l - 1];
+        run(h * nplanes, [&](int i) {
+            const int c = i / h, y = i % h;
+            g_scratch.reserve(w, h);
+            idwtRow(planes[c] + (size_t)y * width, w, g_scratch.row.data());
+        });
+        const int strips = (w + kStrip - 1) / kStrip;
+        run(strips * nplanes, [&](int i) {
+            const int c = i / strips, x0 = (i % strips) * kStrip;
+            g_scratch.reserve(w, h);
+            idwtColumns(planes[c], width, h, x0, std::min(kStrip, w - x0), g_scratch.strip.data());
+        });
+    }
 }
 
 void idwt97_2d(double* plane, int width, int height, int levels) {

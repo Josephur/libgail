@@ -102,7 +102,7 @@ void select(const FrameLayout& L, const Hull& H, const double lambda[3], std::ve
 }  // namespace
 
 // Fast size model: data bytes come straight from the convex hulls; packet-header bytes
-// are modelled as (calibrated header bytes) + beta * (change in included blocks) and
+// are modeled as (calibrated header bytes) + beta * (change in included blocks) and
 // re-calibrated against an exact Tier-2 measurement after each search. A handful of
 // exact measurements replaces a full bisection of exact ones; the result is always
 // verified exactly before it is returned.

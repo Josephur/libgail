@@ -143,7 +143,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
     bool eof = false;
     std::exception_ptr error;
     std::atomic<double> lastLambda{0.0};
-    auto cancelled = [&] { return o.cancel && o.cancel->load(); };
+    auto canceled = [&] { return o.cancel && o.cancel->load(); };
 
     auto fail = [&](std::exception_ptr e) {
         bool first = false;
@@ -172,6 +172,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
             Tier1Frame t1;
             std::vector<uint8_t> cs;
             std::vector<uint8_t> own;
+            const std::string tag = devices[ref->device]->codestreamTag();
             void* in = ref->slot->inputBuffer();
             if (!in) {
                 own.resize(frameBytes);
@@ -183,7 +184,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
                 try {
                     {
                         std::lock_guard<std::mutex> l(srcMutex);
-                        if (eof || cancelled()) break;
+                        if (eof || canceled()) break;
                         if (!src.read(in)) {
                             eof = true;
                             break;
@@ -196,7 +197,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
                     dbg.full = false;
                     const bool dump = o.dumpReferenceEvery > 0 && st.index % o.dumpReferenceEvery == 0;
                     ref->slot->encode(in, t1, &st.tier1, dump ? &dbg : nullptr);
-                    if (cancelled()) break;
+                    if (canceled()) break;
                     if (dump && !o.outDir.empty()) {
                         char name[256];
                         snprintf(name, sizeof name, "%s/frame_%06lld.xyz", o.outDir.c_str(), st.index);
@@ -215,7 +216,7 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
                         rr = allocateRate(L, t1, o.limits);
                         st.recoded = true;
                     }
-                    buildCodestream(L, t1, rr.passes.data(), &cs, nullptr);
+                    buildCodestream(L, t1, rr.passes.data(), &cs, nullptr, tag);
                     st.rateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
                     st.bytes = cs.size();
                     st.lambda = std::min({rr.lambdaComp[0], rr.lambdaComp[1], rr.lambdaComp[2]});
@@ -253,8 +254,8 @@ PipelineSummary runPipeline(FrameSource& src, std::vector<std::unique_ptr<Device
         std::pair<FrameStats, std::vector<uint8_t>> item;
         {
             std::unique_lock<std::mutex> l(outMutex);
-            outCv.wait(l, [&] { return pending.count(nextOut) || active == 0 || error || cancelled(); });
-            if (error || cancelled()) break;
+            outCv.wait(l, [&] { return pending.count(nextOut) || active == 0 || error || canceled(); });
+            if (error || canceled()) break;
             if (!pending.count(nextOut)) break;  // all workers finished
             item = std::move(pending[nextOut]);
             pending.erase(nextOut);

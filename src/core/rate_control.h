@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Post-compression rate-distortion optimisation (PCRD-opt) with DCI limits:
+// Post-compression rate-distortion optimization (PCRD-opt) with DCI limits:
 // whole codestream <= maxTotal bytes and every component <= maxComp bytes.
 #pragma once
 #include <cstddef>
@@ -14,7 +14,7 @@ namespace gail {
 
 struct RateLimits {
     size_t maxTotal = 0;  // bytes per frame (whole codestream)
-    size_t maxComp = 0;   // bytes per colour component (sum of its tile-parts)
+    size_t maxComp = 0;   // bytes per color component (sum of its tile-parts)
 };
 
 struct RateResult {

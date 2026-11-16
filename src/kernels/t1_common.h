@@ -16,7 +16,7 @@
 #endif
 
 // Significance (zero-coding) context, Table D.1. h, v: significant horizontal /
-// vertical neighbours (0..2), d: diagonal (0..4). orient: 0 LL, 1 HL, 2 LH, 3 HH.
+// vertical neighbors (0..2), d: diagonal (0..4). orient: 0 LL, 1 HL, 2 LH, 3 HH.
 GAIL_FN U32 t1_zc_ctx(I32 h, I32 v, I32 d, I32 orient) {
     if (orient == 1) {
         I32 t = h;

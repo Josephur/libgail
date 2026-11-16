@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Frame input: decodes any FFmpeg-readable video to RGB48 frames fitted into a
-// DCI container (scale + letterbox/pillarbox), or synthesises test patterns.
+// DCI container (scale + letterbox/pillarbox), or synthesizes test patterns.
 #pragma once
 #include <cstdint>
 #include <cstdio>
@@ -26,7 +26,7 @@ struct SourceInfo {
 SourceInfo probeSource(const std::string& path);
 
 // The Y'CbCr matrix a source is decoded with, as swscale names it: "bt709", "bt601" or
-// "bt2020". From the stream's colour-space tag; when that is missing, BT.2020 for BT.2020
+// "bt2020". From the stream's color-space tag; when that is missing, BT.2020 for BT.2020
 // primaries, else BT.709 for HD (720 lines or more) and BT.601 for SD. Both input paths
 // (native planar and RGB48 through swscale) use this one decision.
 std::string sourceMatrix(const SourceInfo& info);
@@ -49,7 +49,7 @@ std::unique_ptr<FrameSource> openMemorySource(FrameSource& from, int frames, int
 // size), e.g. from a DI pipeline or `gail-enc --dump-xyz`. Encode with transfer "gamma26"
 // and primaries "xyz", which pass the code values through unchanged.
 std::unique_ptr<FrameSource> openXyzDirSource(const std::string& dir, int width, int height, long long maxFrames);
-// Moving colour-bar / gradient / noise pattern for benchmarks and tests.
+// Moving color-bar / gradient / noise pattern for benchmarks and tests.
 std::unique_ptr<FrameSource> openPatternSource(int width, int height, long long frames, unsigned seed);
 
 }  // namespace gail

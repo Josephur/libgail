@@ -3,6 +3,7 @@
 """Fetch the parts of the CUDA toolkit Gail needs to build (no driver, no installer).
 
 usage: ci/fetch_cuda.py DEST_DIR [--manifest 13.4.3]
+       ci/fetch_cuda.py DEST_DIR --manifest 12.9.2
 
 Downloads NVIDIA's redistributable archives for this platform (Linux or Windows x86_64)
 listed in the manifest redistrib_<version>.json, checks each against the SHA-256 the
@@ -23,7 +24,10 @@ import urllib.request
 import zipfile
 
 BASE = 'https://developer.download.nvidia.com/compute/cuda/redist/'
-COMPONENTS = ['cuda_nvcc', 'cuda_cudart', 'cuda_crt', 'libnvvm', 'cccl']
+# Each entry is the names a component goes by, newest first; None at the end marks one that
+# older manifests do not have at all. CUDA 13.0 split cuda_crt and libnvvm out of cuda_nvcc
+# and renamed cuda_cccl to cccl, so a 12.x manifest has neither of the first two.
+COMPONENTS = [('cuda_nvcc',), ('cuda_cudart',), ('cuda_crt', None), ('libnvvm', None), ('cccl', 'cuda_cccl')]
 
 
 def fetch(url, dest):
@@ -66,7 +70,12 @@ def main():
         manifest = os.path.join(tmp, 'manifest.json')
         fetch(f'{BASE}redistrib_{a.manifest}.json', manifest)
         info = json.load(open(manifest))
-        for name in COMPONENTS:
+        for names in COMPONENTS:
+            name = next((n for n in names if n in info), None)
+            if name is None:
+                if names[-1] is None:
+                    continue  # part of cuda_nvcc in this release
+                sys.exit(f'{names[0]}: not in the {a.manifest} manifest')
             entry = info[name][plat]
             archive = os.path.join(tmp, os.path.basename(entry['relative_path']))
             fetch(BASE + entry['relative_path'], archive)

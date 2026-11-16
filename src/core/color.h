@@ -3,12 +3,14 @@
 //
 // Pipeline per pixel: code value -> linear light (cd/m^2) via a 64K-entry LUT,
 // 3x3 primaries matrix to CIE XYZ, optional HDR luminance tone mapping
-// (BT.2390 EETF towards the 48 cd/m^2 cinema peak), normalisation by 52.37,
-// 1/2.6 power, 12-bit quantisation, DC level shift and the JPEG 2000 ICT.
+// (BT.2390 EETF towards the 48 cd/m^2 cinema peak), normalization by 52.37,
+// 1/2.6 power, 12-bit quantization, DC level shift and the JPEG 2000 ICT.
 #pragma once
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "kernels/ict.h"
 
 namespace gail {
 
@@ -24,7 +26,7 @@ enum class Primaries { BT709, BT2020, P3D65, DCIP3, XYZ };
 enum class ToneMap { Signal, Shoulder, BT2390, None };
 enum class TargetGamut { P3D65, DCIP3, None };
 // What the tone curve is applied to. Channel: each target-gamut channel on its own (bright
-// saturated colours drift toward white the way film and SDR grades render them; keeps
+// saturated colors drift toward white the way film and SDR grades render them; keeps
 // texture in highlights); MaxRGB: the brightest channel (keeps hue and saturation
 // exactly, so bright warm light stays deep orange); Luminance: Y (keeps luminance, so
 // saturated highlights are bleached to white by the gamut stage).
@@ -90,7 +92,7 @@ struct ColorParams {
     double hdrRefWhite = 203.0;    // source reference (diffuse) white, cd/m^2 (BT.2408)
     double cinemaRefWhite = 16.0;  // where that white lands, cd/m^2 (shoulder; leaves ~1.5 stops of highlight room)
     double knee = 0.25;            // shoulder start, fraction of cinemaPeak
-    TargetGamut gamut = TargetGamut::None;  // projector gamut colours are compressed into (None: as DCP-o-matic)
+    TargetGamut gamut = TargetGamut::None;  // projector gamut colors are compressed into (None: as DCP-o-matic)
     double gamutThreshold = 0.8;   // compression starts at this fraction of the gamut edge
     std::string lut3d;             // optional .cube: source R'G'B' -> X'Y'Z' (0..1); overrides the above
     std::vector<float> lut3dData;  // or the same LUT in memory: lut3dSize^3 * 3 floats, red fastest
@@ -104,7 +106,7 @@ public:
     const std::vector<float>& params() const { return params_; }  // CP_COUNT floats (kernels/color_math.h)
     const std::vector<float>& lut3d() const { return lut3_; }     // N^3 * 3 floats, empty without a LUT
     int lut3dSize() const { return lut3n_; }
-    // One-line description of the active colour handling.
+    // One-line description of the active color handling.
     std::string describe() const;
 
     // Convert one RGB48 pixel to integer 12-bit DCI X'Y'Z' codes.
@@ -132,9 +134,9 @@ std::vector<float> readCubeLut(const std::string& path, int& size);
 
 // Forward ICT used on DC-shifted X'Y'Z' (Annex G.3).
 inline void ictForward(float x, float y, float z, float& c0, float& c1, float& c2) {
-    c0 = 0.299f * x + 0.587f * y + 0.114f * z;
-    c1 = -0.16875f * x - 0.33126f * y + 0.5f * z;
-    c2 = 0.5f * x - 0.41869f * y - 0.08131f * z;
+    c0 = (float)ICT_Y0_R * x + (float)ICT_Y0_G * y + (float)ICT_Y0_B * z;
+    c1 = (float)ICT_Y1_R * x + (float)ICT_Y1_G * y + (float)ICT_Y1_B * z;
+    c2 = (float)ICT_Y2_R * x + (float)ICT_Y2_G * y + (float)ICT_Y2_B * z;
 }
 
 }  // namespace gail

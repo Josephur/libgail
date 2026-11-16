@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Compute backend interface. A backend turns an RGB48 frame into Tier-1 output
-// (colour conversion, DWT, quantisation, EBCOT Tier-1). Rate control and Tier-2
+// (color conversion, DWT, quantization, EBCOT Tier-1). Rate control and Tier-2
 // run on the CPU and are shared by all backends.
 #pragma once
 #include <cstdint>
@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/color.h"
+#include "core/decode_backend.h"
 #include "core/layout.h"
 #include "core/tier1_types.h"
 
@@ -39,7 +40,7 @@ struct FrameTimings {
 struct FrameDebug {
     bool full = true;                // false: only the X'Y'Z' reference image
     std::vector<uint16_t> xyz12;     // interleaved integer X'Y'Z'
-    std::vector<uint32_t> coeffs;    // quantised code-block words
+    std::vector<uint32_t> coeffs;    // quantized code-block words
     std::vector<float> wavelet;      // 3 Mallat-layout planes after the DWT (GPU backends)
 };
 
@@ -74,7 +75,17 @@ class Device {
 public:
     virtual ~Device() = default;
     virtual std::string name() const = 0;
+    // What the frames this device encodes carry after the label in their COM marker, to
+    // say what kind of device it is (core/t2.h, codestreamComment()): "" for the CPU.
+    virtual std::string codestreamTag() const { return {}; }
     virtual std::unique_ptr<EncoderSlot> createSlot(const FrameLayout& layout, const EncodeSettings& s) = 0;
+    // Decoding (core/decode_backend.h), for the backends that have it.
+    virtual bool canDecode() const { return false; }
+    virtual std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout&, const DecodeSettings&) {
+        throw std::runtime_error(name() + " does not decode");
+    }
+    // Device memory one decode slot for this layout allocates (0 = none / unknown).
+    virtual uint64_t decoderSlotBytes(const FrameLayout&, const DecodeSettings&) const { return 0; }
     // Device memory one slot for this layout allocates (0 = none / unknown), and what is
     // left now; the pipeline sizes the number of frames in flight from these.
     virtual uint64_t slotBytes(const FrameLayout&, const EncodeSettings&) const { return 0; }
@@ -88,6 +99,7 @@ struct DeviceInfo {
     std::string uuid;        // "GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" (nvidia-smi style); "" if unknown
     std::string pciBusId;    // "0000:01:00.0"; "" if unknown
     uint64_t memoryBytes = 0;
+    std::string plugin;      // CUDA: the backend plugin that serves the device, "gail_cuda13"; "" elsewhere
 };
 // 16 UUID bytes as nvidia-smi prints them.
 std::string formatGpuUuid(const uint8_t bytes[16]);
@@ -120,8 +132,23 @@ std::vector<std::unique_ptr<Device>> createVulkanDevices(const std::vector<int>&
 std::vector<DeviceInfo> listVulkanDevices();
 #endif
 #ifdef GAIL_HAVE_CUDA
+// The CUDA devices that can be used: those a backend plugin is there for and has code
+// for (cuda/cuda_host.h). Listing goes by architecture and sets nothing up; creating a
+// device also loads the kernels there, and leaves out a device they do not load on. A
+// GPU no plugin can run is in neither list, so that "auto" goes on to Vulkan for it.
 std::vector<std::unique_ptr<Device>> createCudaDevices(const std::vector<int>& select, const Logger& log);
 std::vector<DeviceInfo> listCudaDevices();
+// Why the CUDA device with this index cannot be used: "" when it can, or there is none.
+std::string cudaDeviceUnusable(int index);
+// Why the last createCudaDevices() on this thread left out the device with this index,
+// which stays listed for the next call to try (out of memory, busy): "" when it did not.
+std::string cudaDeviceSkipped(int index);
+// The state of the backend, a line each: the plugins loaded, or why not, and the devices
+// that cannot be used.
+std::vector<std::string> cudaBackendNotes();
+// The plugins loaded, "gail_cuda13 gail_cuda12", or "no CUDA plugins"; "" when the
+// backend is linked in (a static library).
+std::string cudaPluginsLoaded();
 #endif
 
 }  // namespace gail

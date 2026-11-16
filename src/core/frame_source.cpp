@@ -120,7 +120,7 @@ public:
         }
         fmt_.width = W;
         fmt_.height = H;
-        // Native planar layouts: FFmpeg only decodes (and resizes if needed); colour
+        // Native planar layouts: FFmpeg only decodes (and resizes if needed); color
         // conversion, chroma upsampling and padding happen on the device.
         auto starts = [&](const char* p) { return info.pixFmt.rfind(p, 0) == 0; };
         const char* planar = starts("yuv420p") || info.pixFmt == "nv12" || info.pixFmt == "p010le" ? "yuv420p"
@@ -130,7 +130,7 @@ public:
                                                                                                     : nullptr;
         // One matrix for both paths. Left to "auto", swscale would take BT.601 for every
         // untagged source, while the planar path assumes BT.709 for HD: the two paths then
-        // gave different colours for the same clip.
+        // gave different colors for the same clip.
         const std::string matrix = sourceMatrix(info);
         std::ostringstream vf;
         if (o.fps > 0) vf << "fps=" << o.fps << ",";
@@ -222,7 +222,7 @@ public:
                 uint16_t* p = rgb + ((size_t)y * w_ + x) * 3;
                 const double u = (double)x / w_, v = (double)y / h_;
                 double r, g, b;
-                if (v < 0.33) {  // colour bars, scrolling
+                if (v < 0.33) {  // color bars, scrolling
                     const int bar = (int)((u + t * 0.1) * 8) & 7;
                     r = (bar & 1) ? 0.75 : 0.05;
                     g = (bar & 2) ? 0.75 : 0.05;
@@ -303,7 +303,7 @@ public:
         if (got != n)
             throw std::runtime_error(path + " holds " + std::to_string(got) + " samples, not the " + std::to_string(n) +
                                      " of a " + std::to_string(fmt_.width) + "x" + std::to_string(fmt_.height) + " frame");
-        // 12-bit code -> 16-bit signal value; the gamma26/xyz colour path maps it back exactly
+        // 12-bit code -> 16-bit signal value; the gamma26/xyz color path maps it back exactly
         for (size_t i = 0; i < n; ++i) p[i] = (uint16_t)((p[i] * 65535u + 2047u) / 4095u);
         return true;
     }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// CUDA backend: the same pipeline as the Vulkan backend (colour, 9/7 DWT,
-// quantisation, EBCOT Tier-1 context modelling + MQ coding), written with CUDA
+// CUDA backend: the same pipeline as the Vulkan backend (color, 9/7 DWT,
+// quantization, EBCOT Tier-1 context modeling + MQ coding), written with CUDA
 // warp intrinsics. Each slot owns a stream, so frames in flight overlap on the GPU;
 // input is decoded straight into pinned memory and results are compacted into
 // mapped host memory by the GPU.
@@ -16,6 +16,11 @@
 
 #include "core/backend.h"
 #include "core/t1_ref.h"
+#include "cuda/cuda_backend.h"
+#include "cuda/cuda_common.h"
+#include "cuda/cuda_decode.h"
+#include "kernels/dwt97.h"
+#include "kernels/ict.h"
 
 // ---- shared Tier-1 kernels (portable headers) -------------------------------------
 // MQ output sink with capacity check; the coder's contexts and probability table live
@@ -38,7 +43,7 @@ __shared__ uint32_t s_tab[47];
 #define MQ_TAB(i) s_tab[i]
 #include "kernels/mq_encoder.h"
 #include "kernels/t1_common.h"
-// Colour maths shared with the CPU and Vulkan paths; tables reached through kernel pointers.
+// Color math shared with the CPU and Vulkan paths; tables reached through kernel pointers.
 #define CM_ARGS const float* __restrict__ cp, const float* __restrict__ eotf, const float* __restrict__ lut3,
 #define CM_PASS cp, eotf, lut3,
 #define CP(i) cp[i]
@@ -50,17 +55,11 @@ namespace gail {
 
 namespace {
 
-#define CUCHECK(x)                                                                                        \
-    do {                                                                                                  \
-        cudaError_t e_ = (x);                                                                             \
-        if (e_ != cudaSuccess) throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e_) + " at " #x); \
-    } while (0)
-
 constexpr int MAX_PASSES = 64;
 constexpr int MAX_PLANES = 24;
 constexpr unsigned FULL = 0xFFFFFFFFu;
 
-// ---------------------------------------------------------------- colour
+// ---------------------------------------------------------------- color
 struct YuvParams {
     int width, aw, ah, ox, oy, bits, fullRange, chroma, sx, sy, rgb;
     float crR, cbG, crG, cbB;
@@ -135,14 +134,14 @@ __global__ void colorKernel(const void* __restrict__ src, const float* __restric
         xyz[3 * i + 2] = (uint16_t)cz;
     }
     const float x = cx - 2048.f, y = cy - 2048.f, z = cz - 2048.f;
-    planes[i] = 0.299f * x + 0.587f * y + 0.114f * z;
-    planes[npix + i] = -0.16875f * x - 0.33126f * y + 0.5f * z;
-    planes[2 * npix + i] = 0.5f * x - 0.41869f * y - 0.08131f * z;
+    planes[i] = (float)ICT_Y0_R * x + (float)ICT_Y0_G * y + (float)ICT_Y0_B * z;
+    planes[npix + i] = (float)ICT_Y1_R * x + (float)ICT_Y1_G * y + (float)ICT_Y1_B * z;
+    planes[2 * npix + i] = (float)ICT_Y2_R * x + (float)ICT_Y2_G * y + (float)ICT_Y2_B * z;
 }
 
 // ---------------------------------------------------------------- DWT
-__constant__ float kLift[4] = {-1.586134342059924f, -0.052980118572961f, 0.882911075530934f, 0.443506852043971f};
-constexpr float kK = 1.230174104914001f;
+__constant__ float kLift[4] = {(float)DWT97_ALPHA, (float)DWT97_BETA, (float)DWT97_GAMMA, (float)DWT97_DELTA};
+constexpr float kK = (float)DWT97_K;
 
 // Whole-sample symmetric extension of a signal of length n >= 2 (only halo samples
 // outside the signal take the loop; the lifting loops never call this).
@@ -168,7 +167,7 @@ __global__ void dwtRowsKernel(const float* __restrict__ src, float* __restrict__
         const int parity = (s & 1) ? 0 : 1;
         const float c = kLift[s];
         for (int i = threadIdx.x * 2 + parity; i < w; i += 2 * blockDim.x) {
-            // symmetric extension at the ends: the mirrored neighbour is row[1] / row[w-2]
+            // symmetric extension at the ends: the mirrored neighbor is row[1] / row[w-2]
             const int im = i > 0 ? i - 1 : 1, ip = i + 1 < w ? i + 1 : w - 2;
             row[i] += c * (row[im] + row[ip]);
         }
@@ -215,7 +214,7 @@ __global__ void dwtColsKernel(const float* __restrict__ src, float* __restrict__
     }
 }
 
-// ---------------------------------------------------------------- quantisation
+// ---------------------------------------------------------------- quantization
 struct CblkEntry {
     uint32_t band, ax, ay, packed;  // packed: w | h << 8 | orient << 16 | comp << 20
 };
@@ -245,11 +244,11 @@ __global__ void quantKernel(const float* __restrict__ planes, const CblkEntry* _
     coeffs[gid] = out;
 }
 
-// ---------------------------------------------------------------- Tier-1 context modelling
+// ---------------------------------------------------------------- Tier-1 context modeling
 constexpr int SUBGROUPS = 4, SYM_CAP = 2560;
 
 struct T1cmParams {
-    const float* planes;  // wavelet planes: the kernel quantises its block itself
+    const float* planes;  // wavelet planes: the kernel quantizes its block itself
     int stride, planeSize;
     const CblkEntry* cblks;
     const BandEntry* bands;
@@ -283,7 +282,7 @@ __global__ void __launch_bounds__(128) t1cmKernel(T1cmParams P) {
     const int w = ce.packed & 0xFF, h = (ce.packed >> 8) & 0xFF, orient = (ce.packed >> 16) & 0xF;
     uint32_t sgn = 0, colMax = 0;
     {
-        // dead-zone quantisation of this block (same arithmetic as quantKernel)
+        // dead-zone quantization of this block (same arithmetic as quantKernel)
         const BandEntry b = P.bands[ce.band];
         const float* src = P.planes + (size_t)((ce.packed >> 20) & 0xF) * P.planeSize + (size_t)ce.ay * P.stride + ce.ax + lane;
         for (int r = 0; r < 32; ++r) {
@@ -383,7 +382,7 @@ __global__ void __launch_bounds__(128) t1cmKernel(T1cmParams P) {
                     const uint32_t S = sig, SL = shUp(S), SR = shDown(S);
                     const uint32_t cand = ~S & SM;
                     const uint32_t nS = (S << 1) | (S >> 1) | SL | (SL << 1) | (SL >> 1) | SR | (SR << 1) | (SR >> 1);
-                    if (!__any_sync(FULL, cand & nS)) continue;  // no sample with a significant neighbour
+                    if (!__any_sync(FULL, cand & nS)) continue;  // no sample with a significant neighbor
                     uint32_t NEW = 0, E = 0, NL = 0;
                     for (;;) {
                         NL = shUp(NEW);
@@ -776,18 +775,7 @@ SlotSizes slotSizes(const FrameLayout& L, const EncodeSettings& s) {
     return z;
 }
 
-// cudaMalloc / cudaHostAlloc failing for lack of memory becomes DeviceOutOfMemory (and the
-// error is cleared, so the device stays usable); anything else is a plain CUDA error.
-void cuAlloc(cudaError_t e, const char* what, size_t bytes) {
-    if (e == cudaSuccess) return;
-    if (e == cudaErrorMemoryAllocation) {
-        cudaGetLastError();
-        throw DeviceOutOfMemory(std::string("cannot allocate ") + std::to_string(bytes >> 20) + " MiB of " + what);
-    }
-    throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e) + " allocating " + what);
-}
-
-class CudaSlot : public EncoderSlot {
+class CudaSlot : public CudaEncoderSlot {
 public:
     CudaSlot(int dev, const FrameLayout& L, const EncodeSettings& s, const Logger& log)
         : dev_(dev), L_(L), s_(s), log_(log) {
@@ -879,7 +867,7 @@ public:
         frameParams_[1] = (float)s_.bitsPerSymbol;
     }
 
-    void encode(const void* frame, Tier1Frame& out, FrameTimings* tm, FrameDebug* dbg) override {
+    Tier1View encodeView(const void* frame, FrameTimings* tm, FrameDebug* dbg) override {
         const auto t0 = std::chrono::steady_clock::now();
         CUCHECK(cudaSetDevice(dev_));
         const uint32_t W = L_.width, H = L_.height, npix = W * H;
@@ -907,7 +895,7 @@ public:
             h = (h + 1) / 2;
         }
         CUCHECK(cudaEventRecord(ev_[3], st));
-        // Tier-1 quantises each block itself; the coefficient buffer is only filled for the
+        // Tier-1 quantizes each block itself; the coefficient buffer is only filled for the
         // debug taps (and by the CPU fallback).
         if (dbg && dbg->full) runQuant(st);
         CUCHECK(cudaEventRecord(ev_[4], st));
@@ -954,17 +942,18 @@ public:
                 CUCHECK(cudaMemcpy(dbg->wavelet.data(), planesA_, (size_t)npix * 12, cudaMemcpyDeviceToHost));
             }
         }
+        Tier1View view;
         if (!ok) {
             if (log_)
                 log_(LogLevel::Warning, "cuda: Tier-1 buffer overflow (flags " + std::to_string(flags) +
                                             "), using CPU fallback for this frame");
-            cpuFallback(out);
+            cpuFallback(fallback_);
+            view = {fallback_.info.data(), fallback_.passLen.data(), fallback_.passDist.data(), fallback_.data.data(),
+                    fallback_.info.size(), fallback_.passLen.size(), fallback_.data.size()};
         } else {
-            out.info.resize(n_);
-            std::memcpy(out.info.data(), hostInfo_, (size_t)n_ * sizeof(CblkInfo));
-            out.passLen.assign(hostPass_, hostPass_ + totalPasses);
-            out.passDist.assign((const int32_t*)hostPass_ + passCap_, (const int32_t*)hostPass_ + passCap_ + totalPasses);
-            out.data.assign(hostData_, hostData_ + totalData);
+            // the pinned buffers themselves: the caller copies them where it wants them
+            view = {reinterpret_cast<const CblkInfo*>(hostInfo_), hostPass_, (const int32_t*)hostPass_ + passCap_, hostData_,
+                    n_, totalPasses, totalData};
         }
         if (tm) {
             float ms[7];
@@ -984,6 +973,7 @@ public:
             tm->codedBytes = totalData;
             tm->total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         }
+        return view;
     }
 
 private:
@@ -1044,6 +1034,7 @@ private:
     const FrameLayout& L_;
     EncodeSettings s_;
     Logger log_;
+    Tier1Frame fallback_;  // what a CPU fallback coded
     uint32_t n_ = 0;
     size_t symCap_ = 0, outCap_ = 0, passCap_ = 0, dataCap_ = 0, inBytes_ = 0;
     cudaStream_t stream_ = nullptr;
@@ -1087,6 +1078,13 @@ public:
     uint64_t slotBytes(const FrameLayout& L, const EncodeSettings& s) const override {
         return slotSizes(L, s).deviceBytes();
     }
+    bool canDecode() const override { return true; }
+    std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout& L, const DecodeSettings& s) override {
+        return createCudaDecoderSlot(dev_, L, s);
+    }
+    uint64_t decoderSlotBytes(const FrameLayout& L, const DecodeSettings& s) const override {
+        return gpuDecoderSlotBytes(L, s);
+    }
     DeviceMemory memory() const override {
         DeviceMemory m;
         size_t f = 0, t = 0;
@@ -1108,39 +1106,52 @@ private:
 
 }  // namespace
 
-std::vector<DeviceInfo> listCudaDevices() {
+std::vector<CudaDeviceDesc> cudaEnumerate() {
     int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess) return {};
-    std::vector<DeviceInfo> out;
+    if (const cudaError_t e = cudaGetDeviceCount(&n); e != cudaSuccess) {
+        cudaGetLastError();
+        throw std::runtime_error(cudaGetErrorString(e));  // "no CUDA-capable device is detected", an insufficient driver, ...
+    }
+    std::vector<CudaDeviceDesc> out;
     for (int i = 0; i < n; ++i) {
         cudaDeviceProp p;
-        if (cudaGetDeviceProperties(&p, i) != cudaSuccess) continue;
-        DeviceInfo d;
-        d.index = i;
-        d.name = p.name;
-        d.uuid = formatGpuUuid(reinterpret_cast<const uint8_t*>(p.uuid.bytes));
+        if (cudaGetDeviceProperties(&p, i) != cudaSuccess) {
+            cudaGetLastError();
+            continue;
+        }
+        CudaDeviceDesc d;
+        d.info.index = i;
+        d.info.name = p.name;
+        d.info.uuid = formatGpuUuid(reinterpret_cast<const uint8_t*>(p.uuid.bytes));
         char pci[32];
         std::snprintf(pci, sizeof pci, "%04x:%02x:%02x.0", p.pciDomainID, p.pciBusID, p.pciDeviceID);
-        d.pciBusId = pci;
-        d.memoryBytes = p.totalGlobalMem;
+        d.info.pciBusId = pci;
+        d.info.memoryBytes = p.totalGlobalMem;
+        d.smMajor = p.major;
+        d.smMinor = p.minor;
         out.push_back(d);
     }
     return out;
 }
 
-std::vector<std::unique_ptr<Device>> createCudaDevices(const std::vector<int>& select, const Logger& log) {
-    int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess) return {};
-    std::vector<std::unique_ptr<Device>> out;
-    for (int i = 0; i < n; ++i) {
-        if (!select.empty() && std::find(select.begin(), select.end(), i) == select.end()) continue;
-        try {
-            out.push_back(std::make_unique<CudaDevice>(i, log));
-        } catch (const std::exception& e) {
-            if (log) log(LogLevel::Warning, "cuda: skipping device " + std::to_string(i) + ": " + e.what());
-        }
+std::string cudaKernelsUnusable(int device, bool* noCode) {
+    if (noCode) *noCode = false;
+    cudaError_t e = cudaSetDevice(device);
+    if (e == cudaSuccess) {
+        // Any kernel will do: asking for its attributes loads this build's code for the
+        // device, or fails the way the first launch would.
+        cudaFuncAttributes attr;
+        e = cudaFuncGetAttributes(&attr, scanKernel);
     }
-    return out;
+    if (e == cudaSuccess) return "";
+    cudaGetLastError();
+    if (e == cudaErrorNoKernelImageForDevice || e == cudaErrorInvalidDeviceFunction) {
+        if (noCode) *noCode = true;  // nothing here will ever run on it
+        return "not built for this architecture";
+    }
+    return cudaGetErrorString(e);  // out of memory, busy, exclusive: may pass later
 }
+
+std::unique_ptr<Device> createCudaDevice(int device, const Logger& log) { return std::make_unique<CudaDevice>(device, log); }
 
 }  // namespace gail

@@ -4,14 +4,16 @@
 #pragma once
 #include <functional>
 
+#include "kernels/dwt97.h"
+
 namespace gail {
 
 // Lifting constants (Annex F.4.8.2 / F.3.8.2).
-constexpr double kAlpha = -1.586134342059924;
-constexpr double kBeta = -0.052980118572961;
-constexpr double kGamma = 0.882911075530934;
-constexpr double kDelta = 0.443506852043971;
-constexpr double kK = 1.230174104914001;
+constexpr double kAlpha = DWT97_ALPHA;
+constexpr double kBeta = DWT97_BETA;
+constexpr double kGamma = DWT97_GAMMA;
+constexpr double kDelta = DWT97_DELTA;
+constexpr double kK = DWT97_K;
 
 // Forward 1-D transform of n samples starting at an even coordinate.
 // Output is de-interleaved: ceil(n/2) low-pass samples followed by floor(n/2) high-pass.
@@ -26,6 +28,10 @@ void fdwt97_2d(float* plane, int width, int height, int levels);
 // The same for several planes of equal size at once; the rows and column strips of all
 // planes are distributed with `par` (nullptr: this thread). Bit-identical to the above.
 void fdwt97_2d(float* const* planes, int nplanes, int width, int height, int levels, const ParallelFor* par);
+// Inverse of the above, in place. The top `skip` levels are left undone: the top-left
+// ceil(width / 2^skip) x ceil(height / 2^skip) samples are then the picture at that
+// reduced size.
+void idwt97_2d(float* const* planes, int nplanes, int width, int height, int levels, int skip, const ParallelFor* par);
 // Inverse of fdwt97_2d (double precision helper used for tests / norms).
 void idwt97_2d(double* plane, int width, int height, int levels);
 
