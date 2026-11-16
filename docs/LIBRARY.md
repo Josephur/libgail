@@ -498,8 +498,13 @@ GPU that no CUDA plugin has code for leaves the decoder on CUDA with the next on
   its own: `gail_decoder_decode()` returns the status, and in pull or callback mode the
   image arrives in its place in the order with a negative `status` and no picture, with
   the reason in `gail_last_error()`. The decoder carries on. `gail_decoder_error()` is
-  only set when a device fails; the decoder then stops, and every later send or decode
-  returns that failure.
+  only set when a device fails, while the decoder is being set up or in the middle of the
+  stream (a GPU that is lost or reset, a driver error). The decoder then stops: the frame
+  the device failed on and every frame sent before and not yet decoded come back with
+  `GAIL_ERROR_FAILED`, nothing more goes to the device, and every later send or decode
+  returns that failure. The app destroys the decoder and makes a new one, if it wants to
+  carry on (perhaps on another device). Running out of device memory for one frame fails
+  only that frame.
 * **Seeking:** `gail_decoder_flush()` drops what was sent and not yet received.
   `gail_decoder_cancel()` stops everything at once: calls that are waiting return
   `GAIL_ERROR_CANCELLED`. A `gail_decoder_decode()` whose frame is on a device by then

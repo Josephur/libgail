@@ -528,9 +528,11 @@ GAIL_API int gail_decoder_finish(gail_decoder* d);
    into the caller's buffer), with no picture. */
 GAIL_API void gail_decoder_cancel(gail_decoder* d);
 
-/* NULL while all is well, else what stopped the decoder (a device failure; a frame that
-   cannot be decoded does not stop it). Once stopped, send and decode return that failure
-   and the decoder is not set up again: it needs to be destroyed. */
+/* NULL while all is well, else what stopped the decoder (a device failure, while setting
+   up or while decoding; a frame that cannot be decoded does not stop it). The frame the
+   device failed on, and every frame handed over before and not yet decoded, comes back
+   with GAIL_ERROR_FAILED. Once stopped, send and decode return that failure and the
+   decoder is not set up again: it needs to be destroyed. */
 GAIL_API const char* gail_decoder_error(const gail_decoder* d);
 
 #ifdef __cplusplus

@@ -137,6 +137,11 @@ thread_local const void* tlsDelivering = nullptr;
 
 }  // namespace
 
+gail::DecoderDeviceHook& gail::decoderDeviceHook() {
+    static DecoderDeviceHook hook;
+    return hook;
+}
+
 struct gail_decoder {
     gail_decoder_config cfg{};
     std::vector<std::unique_ptr<Device>> devices;
@@ -197,24 +202,28 @@ struct gail_decoder {
         cfg.log(cfg.log_user, level, buf);
     }
 
+    // Stops the decoder for good (the first failure is the one kept). `error` is written
+    // before `failed` is set and never again, so gail_decoder_error() may read it unlocked.
     void setError(const std::string& what, int status = GAIL_ERROR_FAILED) {
         std::lock_guard<std::mutex> l(m);
-        if (failed.exchange(true)) return;
+        if (failed.load()) return;
         error = what;
         failStatus = status;
+        failed.store(true);
     }
 
     // First codestream: learn the picture's size and structure, make the frames in flight
     // and start their threads. Returns a status with the calling thread's last error set.
     int setUp(const uint8_t* data, size_t size) {
         std::lock_guard<std::mutex> l(setupMutex);
-        if (configured.load()) return GAIL_OK;
         if (failed.load()) {
-            // A device failed setting up: that stops the decoder, rather than letting a later
-            // codestream (perhaps of another size) set it up afresh
+            // A device failed, setting up or decoding: that stops the decoder. Nothing more
+            // goes to the devices, and it is not set up afresh from a later codestream
+            // (perhaps of another size).
             std::lock_guard<std::mutex> lm(m);
             return fail(failStatus, error);
         }
+        if (configured.load()) return GAIL_OK;
         StreamHeader h;
         std::string err;
         if (!parseCodestream(data, size, true, h, err)) return fail(GAIL_ERROR_INVALID, err);
@@ -299,13 +308,21 @@ struct gail_decoder {
         }
     }
 
+    // What is wrong with a codestream fails only its own frame; what goes wrong on the
+    // device (other than running out of memory for this frame) stops the decoder.
     void decodeOne(Job& job, Worker& w) {
         job.device = w.device;
+        if (failed.load()) {  // queued before a device failed: it does not go to one
+            std::lock_guard<std::mutex> l(m);
+            return job.failWith(failStatus, error);
+        }
+        const uint8_t* data = job.cs.data();
+        const size_t size = job.cs.size();
+        const FrameLayout* L = layout.get();
+        std::optional<FrameLayout> own;
         try {
             StreamHeader h;
             std::string err;
-            const uint8_t* data = job.cs.data();
-            const size_t size = job.cs.size();
             if (!parseCodestream(data, size, false, h, err)) return job.failWith(GAIL_ERROR_INVALID, "damaged codestream: " + err);
             if (!h.supported) return job.failWith(GAIL_ERROR_UNSUPPORTED, "unsupported codestream: " + h.unsupported);
             if (h.width != first.width || h.height != first.height || h.levels != first.levels)
@@ -315,8 +332,6 @@ struct gail_decoder {
                                         std::to_string(first.width) + "x" + std::to_string(first.height) + " with " +
                                         std::to_string(first.levels) + ": use another decoder");
             // Step sizes usually stay the same for a whole track; a frame with its own gets its own layout
-            const FrameLayout* L = layout.get();
-            std::optional<FrameLayout> own;
             if (h.guardBits != first.guardBits || std::memcmp(h.eps, first.eps, sizeof h.eps) != 0 ||
                 std::memcmp(h.mu, first.mu, sizeof h.mu) != 0) {
                 own.emplace(layoutFor(h));
@@ -324,11 +339,28 @@ struct gail_decoder {
             }
             if (!parsePackets(data, h, *L, L->levels - ds.reduce, w.blocks, err))
                 return job.failWith(GAIL_ERROR_INVALID, "damaged codestream: " + err);
+            // What the slot would refuse for the codestream's sake is refused here, so that
+            // whatever the slot throws is the device's doing
+            if (!sameGeometry(*L, *layout) || (int)w.blocks.size() != layout->numCblks())
+                return job.failWith(GAIL_ERROR_UNSUPPORTED,
+                                    "unsupported codestream: its code-blocks differ from the first frame's: use another decoder");
+            if (size > 0xFFFFFFFFu) return job.failWith(GAIL_ERROR_UNSUPPORTED, "unsupported codestream: larger than 4 GiB");
+        } catch (const std::bad_alloc&) {
+            return job.failWith(GAIL_ERROR_NOMEM, "out of memory");
+        } catch (const std::exception& e) {
+            return job.failWith(GAIL_ERROR_UNSUPPORTED, std::string("unsupported codestream: ") + e.what());
+        }
+        try {
             w.slot->decode(*L, data, size, w.blocks, job.dst, job.stride, nullptr);
+        } catch (const DeviceOutOfMemory& e) {
+            job.failWith(GAIL_ERROR_NOMEM, devices[w.device]->name() + ": " + e.what());
         } catch (const std::bad_alloc&) {
             job.failWith(GAIL_ERROR_NOMEM, "out of memory");
         } catch (const std::exception& e) {
-            job.failWith(GAIL_ERROR_FAILED, e.what());
+            const std::string why = devices[w.device]->name() + ": " + e.what();
+            log(GAIL_LOG_ERROR, "%s: the decoder stops", why.c_str());
+            setError(why);
+            job.failWith(GAIL_ERROR_FAILED, why);
         }
     }
 
@@ -573,6 +605,7 @@ int gail_decoder_create(const gail_decoder_config* c, gail_decoder** decoder) {
             }
         }
         if (d->devices.empty()) throw ApiError(GAIL_ERROR_UNSUPPORTED, why);
+        if (decoderDeviceHook()) decoderDeviceHook()(d->devices);
         for (size_t i = 0; i < d->devices.size(); ++i) d->devicesDesc += (i ? ", " : "") + d->devices[i]->name();
         *decoder = d.release();
         return GAIL_OK;

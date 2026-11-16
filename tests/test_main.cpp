@@ -16,6 +16,7 @@
 #include <tuple>
 #include <vector>
 
+#include "api/devices.h"
 #include "core/backend.h"
 #include "core/bitio.h"
 #include "core/codestream_check.h"
@@ -53,6 +54,8 @@ static uint8_t g_t1dZc[gail::kT1dZcSize], g_t1dSc[gail::kT1dScSize];
 #define T1D_ZC(i) ((uint32_t)g_t1dZc[(i)])
 #define T1D_SC(i) ((uint32_t)g_t1dSc[(i)])
 #include "kernels/t1_decode.h"
+
+#include "gail/gail.h"
 
 using namespace gail;
 
@@ -1173,6 +1176,26 @@ struct FaultyDevice : Device {
         ++created;
         return std::make_unique<Slot>(*this, inner->createSlot(L, s));
     }
+    // The same for decoding: the decode() call numbered decodeFailAt (counted over all of
+    // this device's slots) throws, as a lost device does
+    std::atomic<int> decodes{0};
+    int decodeFailAt = -1;
+    struct DecSlot : DecoderSlot {
+        FaultyDevice& d;
+        std::unique_ptr<DecoderSlot> inner;
+        DecSlot(FaultyDevice& dev, std::unique_ptr<DecoderSlot> s) : d(dev), inner(std::move(s)) {}
+        void decode(const FrameLayout& frame, const uint8_t* data, size_t size, const std::vector<CblkCode>& blocks, void* dst,
+                    ptrdiff_t strideBytes, DecodeTimings* tm) override {
+            if (d.decodes++ == d.decodeFailAt) throw std::runtime_error("device lost (injected)");
+            inner->decode(frame, data, size, blocks, dst, strideBytes, tm);
+        }
+    };
+    bool canDecode() const override { return inner->canDecode(); }
+    std::unique_ptr<DecoderSlot> createDecoderSlot(const FrameLayout& L, const DecodeSettings& s) override {
+        return std::make_unique<DecSlot>(*this, inner->createDecoderSlot(L, s));
+    }
+    uint64_t decoderSlotBytes(const FrameLayout& L, const DecodeSettings& s) const override { return inner->decoderSlotBytes(L, s); }
+    DeviceMemory memory() const override { return inner->memory(); }
 };
 struct FaultySource : FrameSource {
     std::unique_ptr<FrameSource> inner;
@@ -1893,6 +1916,124 @@ static EncodedFrame encodeCpuFrame(Profile prof, Container cont = Container::Fla
 
 // The headers of an encoded frame say what the encoder's layout says, and reading its
 // packets gives back, for every code-block, exactly the passes and bytes that were written.
+// The library's decoder on a device that dies in the middle of the stream (the CPU backend
+// inside FaultyDevice): the frame it was decoding fails, the decoder stops for good and
+// says why in gail_decoder_error(), and nothing more goes to the device. A damaged
+// codestream, by contrast, fails alone.
+static void testDecoderDeviceLoss() {
+    const EncodedFrame f = encodeCpuFrame(Profile::Cinema2K);
+    std::vector<uint8_t> cs = f.cs;
+    std::vector<uint8_t> cut(cs.begin(), cs.begin() + cs.size() / 2);
+    gail_packet pkt{}, damaged{};
+    pkt.data = cs.data();
+    pkt.size = cs.size();
+    damaged.data = cut.data();
+    damaged.size = cut.size();
+
+    FaultyDevice* dev = nullptr;
+    int failAt = -1;
+    decoderDeviceHook() = [&](std::vector<std::unique_ptr<Device>>& devs) {
+        auto d = std::make_unique<FaultyDevice>();
+        d->inner = std::move(devs[0]);
+        d->decodeFailAt = failAt;
+        dev = d.get();
+        devs[0] = std::move(d);
+    };
+    auto make = [&](int fail, int inFlight, gail_image_cb cb, void* user) {
+        failAt = fail;
+        gail_decoder_config dc;
+        gail_decoder_config_defaults(&dc);
+        dc.backend = GAIL_BACKEND_CPU;
+        dc.frames_in_flight = inFlight;
+        dc.on_image = cb;
+        dc.user = user;
+        gail_decoder* d = nullptr;
+        CHECK(gail_decoder_create(&dc, &d) == GAIL_OK && dev && std::strstr(gail_decoder_devices(d), "faulty"), "decoder create: %s",
+              gail_last_error());
+        return d;
+    };
+    auto lost = [](gail_decoder* d) { return gail_decoder_error(d) && std::strstr(gail_decoder_error(d), "device lost (injected)"); };
+
+    // blocking: a damaged frame fails alone; the device's failure stops the decoder
+    if (gail_decoder* d = make(1, 1, nullptr, nullptr)) {
+        gail_image img{};
+        CHECK(gail_decoder_decode(d, &pkt, &img) == GAIL_OK, "decode before the failure: %s", gail_last_error());
+        gail_image_free(&img);
+        img = gail_image{};
+        CHECK(gail_decoder_decode(d, &damaged, &img) == GAIL_ERROR_INVALID && !gail_decoder_error(d),
+              "a damaged frame: %s, decoder error %s", gail_last_error(), gail_decoder_error(d) ? gail_decoder_error(d) : "none");
+        img = gail_image{};
+        const int r = gail_decoder_decode(d, &pkt, &img);
+        CHECK(r == GAIL_ERROR_FAILED && !img.data[0] && std::strstr(gail_last_error(), "device lost") && lost(d),
+              "decode as the device fails: %s (%s), decoder error %s", gail_status_string(r), gail_last_error(),
+              gail_decoder_error(d) ? gail_decoder_error(d) : "none");
+        img = gail_image{};
+        CHECK(gail_decoder_decode(d, &pkt, &img) == GAIL_ERROR_FAILED && std::strstr(gail_last_error(), "device lost"),
+              "decode after the failure: %s", gail_last_error());
+        CHECK(gail_decoder_send(d, &pkt, nullptr) == GAIL_ERROR_FAILED, "send after the failure: %s", gail_last_error());
+        CHECK(dev->decodes == 2, "the failed device was given %d frames, 2 expected", dev->decodes.load());
+        gail_decoder_destroy(d);
+    }
+
+    // pull: the frame being decoded fails, and so does every one sent before the failure
+    // and not yet decoded, without going to the device
+    if (gail_decoder* d = make(2, 1, nullptr, nullptr)) {
+        int sent = 0, got = 0, failedImages = 0, r;
+        gail_image img;
+        auto take = [&](gail_image& im) {
+            CHECK(im.index == got, "image %d arrived as %lld", got, (long long)im.index);
+            if (im.status != GAIL_OK) {
+                ++failedImages;
+                CHECK(im.status == GAIL_ERROR_FAILED && std::strstr(gail_last_error(), "device lost"), "image %d: %s (%s)", got,
+                      gail_status_string(im.status), gail_last_error());
+            } else {
+                CHECK(failedImages == 0, "image %d decoded after one failed on the lost device", got);
+            }
+            gail_image_free(&im);
+            ++got;
+        };
+        while (sent < 8) {
+            r = gail_decoder_send(d, &pkt, nullptr);
+            if (r == GAIL_EAGAIN) {
+                CHECK(gail_decoder_receive(d, &img, 0) == GAIL_OK, "receive after GAIL_EAGAIN");
+                take(img);
+                continue;
+            }
+            if (r != GAIL_OK) break;
+            ++sent;
+        }
+        CHECK(r == GAIL_OK || (r == GAIL_ERROR_FAILED && lost(d)), "send %d: %s", sent, gail_last_error());
+        gail_decoder_send(d, nullptr, nullptr);
+        while ((r = gail_decoder_receive(d, &img, 1)) == GAIL_OK) take(img);
+        CHECK(r == GAIL_EOF && got == sent && failedImages >= 1 && got - failedImages == 2 && lost(d),
+              "pull: %d sent, %d received, %d failed, then %s; decoder error %s", sent, got, failedImages, gail_status_string(r),
+              gail_decoder_error(d) ? gail_decoder_error(d) : "none");
+        CHECK(dev->decodes == 3, "the failed device was given %d frames, 3 expected", dev->decodes.load());
+        CHECK(gail_decoder_send(d, &pkt, nullptr) == GAIL_ERROR_FAILED, "send after the failure: %s", gail_last_error());
+        gail_decoder_destroy(d);
+    }
+
+    // callback: the same, the failed images with their status
+    struct Seen {
+        int calls = 0, ok = 0, failed = 0;
+    } seen;
+    auto onImage = [](void* user, const gail_image* img) {
+        Seen& s = *static_cast<Seen*>(user);
+        ++s.calls;
+        (img->status == GAIL_OK ? s.ok : s.failed)++;
+    };
+    if (gail_decoder* d = make(1, 1, onImage, &seen)) {
+        int sent = 0;
+        for (int i = 0; i < 4; ++i) sent += gail_decoder_send(d, &pkt, nullptr) == GAIL_OK;
+        CHECK(gail_decoder_finish(d) == GAIL_OK, "finish after the failure: %s", gail_last_error());
+        CHECK(seen.calls == sent && seen.ok == 1 && seen.failed == sent - 1 && lost(d),
+              "callback: %d sent, %d images, %d decoded, %d failed; decoder error %s", sent, seen.calls, seen.ok, seen.failed,
+              gail_decoder_error(d) ? gail_decoder_error(d) : "none");
+        gail_decoder_destroy(d);
+    }
+    decoderDeviceHook() = nullptr;
+}
+
 static void testParse(Profile prof, Container cont) {
     const EncodedFrame f = encodeCpuFrame(prof, cont);
     const FrameLayout& L = f.L;
@@ -2439,6 +2580,7 @@ int main(int argc, char** argv) {
     run("fit", testFitSlots);
     run("cpus", testCpuCount);
     run("faults", testFaults);
+    run("decloss", testDecoderDeviceLoss);
     run("limits", testRateLimits);
     run("comment", testCodestreamComment);
     run("checker", testCheckerMalformed);

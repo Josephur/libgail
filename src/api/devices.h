@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Device listing and selection shared by gail-enc and the library API.
 #pragma once
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,5 +30,11 @@ std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const st
 
 // Whether a backend ("cuda", "vulkan", "cpu") of this build can decode.
 bool backendDecodes(const std::string& backend);
+
+// For the tests, which link the library's sources in: when set, gail_decoder_create()
+// hands the devices it has made to this before using them, to wrap them in devices that
+// fail on purpose. Not part of the library's interface.
+using DecoderDeviceHook = std::function<void(std::vector<std::unique_ptr<Device>>&)>;
+DecoderDeviceHook& decoderDeviceHook();
 
 }  // namespace gail
