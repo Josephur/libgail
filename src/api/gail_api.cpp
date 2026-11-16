@@ -231,6 +231,13 @@ bool isPlanar(gail_pixel_format f) {
     return planarInfo(f, p);
 }
 
+std::string cudaPlugins() {
+#ifdef GAIL_HAVE_CUDA
+    if (const std::string loaded = cudaPluginsLoaded(); !loaded.empty()) return "; " + loaded;
+#endif
+    return "";
+}
+
 const char* backendsBuilt() {
     return ""
 #ifdef GAIL_HAVE_CUDA
@@ -460,7 +467,8 @@ const char* gail_status_string(int s) {
 unsigned gail_version(void) { return GAIL_VERSION; }
 
 const char* gail_version_string(void) {
-    static const std::string s = std::string(gail::buildVersion()) + " (" + backendsBuilt() + ")";
+    // with the CUDA backend in plugins, also the ones loaded: "1.1.0 (cuda vulkan cpu; gail_cuda13 gail_cuda12)"
+    static const std::string s = std::string(gail::buildVersion()) + " (" + backendsBuilt() + cudaPlugins() + ")";
     return s.c_str();
 }
 

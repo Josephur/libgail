@@ -11,6 +11,7 @@ namespace gail {
 
 // Devices a backend offers, without setting them up. backend "auto" lists the backend
 // that "auto" would encode with (CUDA, else Vulkan, else CPU); `chosen` is set to it.
+// CUDA offers the GPUs one of its plugins can run, and no others.
 std::vector<DeviceInfo> listDevices(std::string backend, std::string& chosen);
 
 // backend: "auto" (CUDA, else Vulkan, else CPU), "cuda", "vulkan" or "cpu".
@@ -19,8 +20,9 @@ std::vector<DeviceInfo> listDevices(std::string backend, std::string& chosen);
 // `select` (indices; empty = all). With IDs, "auto" uses CUDA if it has every device,
 // else Vulkan. cpuThreads / cpuLowPriority configure the CPU backend (see createCpuDevice).
 // The backends' notes (devices skipped, what each device is) go to `log`.
-// Sets `chosen` to the backend used. Throws when nothing usable is found or an ID matches
-// no device.
+// Sets `chosen` to the backend used. Throws when nothing usable is found, an ID matches
+// no device, or "cuda" is asked for a GPU that no CUDA plugin can run ("auto" uses
+// Vulkan for it instead).
 std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const std::vector<int>& select,
                                                    const std::vector<std::string>& ids, int cpuThreads,
                                                    bool cpuLowPriority, const Logger& log, std::string& chosen);

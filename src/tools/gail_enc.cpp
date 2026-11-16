@@ -143,8 +143,14 @@ int main(int argc, char** argv) {
             for (const char* b : {"cuda", "vulkan", "cpu"}) {
                 std::string chosen;
                 for (const auto& d : listDevices(b, chosen))
-                    std::printf("%-6s %d: %s%s%s%s\n", b, d.index, d.name.c_str(), d.uuid.empty() ? "" : "  ",
-                                d.uuid.c_str(), d.pciBusId.empty() ? "" : ("  " + d.pciBusId).c_str());
+                    std::printf("%-6s %d: %s%s%s%s%s\n", b, d.index, d.name.c_str(), d.uuid.empty() ? "" : "  ",
+                                d.uuid.c_str(), d.pciBusId.empty() ? "" : ("  " + d.pciBusId).c_str(),
+                                d.plugin.empty() ? "" : ("  [" + d.plugin + "]").c_str());
+#ifdef GAIL_HAVE_CUDA
+                // which CUDA plugins are loaded, and the GPUs none of them can run
+                if (std::string(b) == "cuda")
+                    for (const auto& note : cudaBackendNotes()) std::printf("%s\n", note.c_str());
+#endif
             }
             return 0;
         }

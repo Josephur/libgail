@@ -59,6 +59,16 @@ std::vector<int> resolve(const std::vector<DeviceInfo>& devices, const std::vect
     return out;
 }
 
+// What the CUDA backend says about plugins it did not load and devices it cannot use, for
+// the message of an error that may be down to one of them.
+std::string cudaNotes() {
+    std::string s;
+#ifdef GAIL_HAVE_CUDA
+    for (const auto& note : cudaBackendNotes()) s += "\n  " + note;
+#endif
+    return s;
+}
+
 std::string describe(const std::vector<DeviceInfo>& devices, const std::string& backend) {
     std::string s;
     for (const auto& d : devices)
@@ -94,7 +104,7 @@ std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const st
         std::vector<std::string> candidates = backend == "auto" ? std::vector<std::string>{"cuda", "vulkan"}
                                                                 : std::vector<std::string>{backend};
         std::string missing, available;
-        bool ok = false;
+        bool ok = false, cudaLacks = false;
         for (const auto& b : candidates) {
             const auto devices = listBackend(b);
             picked = resolve(devices, ids, missing);
@@ -104,11 +114,18 @@ std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const st
                 ok = true;
                 break;
             }
+            cudaLacks = cudaLacks || b == "cuda";
         }
+#ifdef GAIL_HAVE_CUDA
+        // "auto" went past CUDA for these devices: say what CUDA had against them
+        if (ok && cudaLacks && log)
+            for (const auto& note : cudaBackendNotes()) log(LogLevel::Info, note);
+#endif
         if (!ok)
             throw std::runtime_error("no " + (backend == "auto" ? std::string("GPU") : backend + " device") +
                                      " matches \"" + missing + "\"; available:" +
-                                     (available.empty() ? std::string(" none") : available));
+                                     (available.empty() ? std::string(" none") : available) +
+                                     (backend == "auto" || backend == "cuda" ? cudaNotes() : std::string()));
     }
 
     std::vector<std::unique_ptr<Device>> devices;
@@ -138,7 +155,13 @@ std::vector<std::unique_ptr<Device>> createDevices(std::string backend, const st
 #endif
     } else if (backend == "cuda") {
 #ifdef GAIL_HAVE_CUDA
+        // A device that was asked for by name and cannot be used is an error; it is not
+        // left out without a word.
+        for (int i : picked)
+            if (const std::string why = cudaDeviceUnusable(i); !why.empty())
+                throw std::runtime_error("cuda device " + std::to_string(i) + " cannot be used: " + why);
         devices = createCudaDevices(picked, log);
+        if (devices.empty()) throw std::runtime_error("no usable cuda devices" + cudaNotes());
 #else
         throw std::runtime_error("built without CUDA support");
 #endif
