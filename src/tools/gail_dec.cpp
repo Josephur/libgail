@@ -30,7 +30,9 @@ void usage() {
         "      --frames N          decode only the first N codestreams\n"
         "      --loops N           decode the set N times over (for timing; default 1)\n"
         "      --backend B         auto | cuda | vulkan | cpu (default auto)\n"
-        "      --gpus LIST         devices to use: indices (0,1) or 'all' (default: the first)\n"
+        "      --gpus LIST         devices to use: indices (0,1), IDs as --list-devices shows them\n"
+        "                          (UUIDs as nvidia-smi prints them, or PCI bus IDs), or 'all'\n"
+        "                          (default: the first)\n"
         "      --list-devices      list the devices of every backend and exit\n"
         "      --slots N           frames in flight per device\n"
         "      --threads N         CPU backend threads (default: the cores this process may use)\n"
@@ -160,18 +162,36 @@ int main(int argc, char** argv) {
     cfg.cpu_threads = threads;
     cfg.low_priority = lowPriority;
     if (verbose) cfg.log = onLog;
+    // --gpus 0,1 selects by index; anything else (UUIDs, PCI bus IDs) by ID, which the
+    // library checks against the devices there are
     std::vector<int> devices;
+    std::vector<std::string> idText;
+    std::vector<const char*> ids;
     if (gpus == "all") {
         cfg.num_devices = GAIL_ALL_DEVICES;
     } else if (!gpus.empty()) {
-        for (size_t p = 0; p < gpus.size();) {
+        bool numeric = true;
+        for (size_t p = 0;;) {
             const size_t q = gpus.find(',', p);
-            devices.push_back(std::atoi(gpus.substr(p, q - p).c_str()));
+            const std::string t = gpus.substr(p, q == std::string::npos ? std::string::npos : q - p);
+            if (t.empty()) {
+                std::fprintf(stderr, "--gpus %s: empty entry\n", gpus.c_str());
+                return 2;
+            }
+            numeric = numeric && t.size() <= 4 && t.find_first_not_of("0123456789") == std::string::npos;
+            idText.push_back(t);
             if (q == std::string::npos) break;
             p = q + 1;
         }
-        cfg.devices = devices.data();
-        cfg.num_devices = (int)devices.size();
+        if (numeric) {
+            for (const auto& t : idText) devices.push_back(std::atoi(t.c_str()));
+            cfg.devices = devices.data();
+            cfg.num_devices = (int)devices.size();
+        } else {
+            for (const auto& t : idText) ids.push_back(t.c_str());
+            cfg.device_ids = ids.data();
+            cfg.num_device_ids = (int)ids.size();
+        }
     }
     gail_decoder* dec = nullptr;
     if (gail_decoder_create(&cfg, &dec) != GAIL_OK) {
