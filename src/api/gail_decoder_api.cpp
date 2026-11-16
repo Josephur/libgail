@@ -179,6 +179,7 @@ struct gail_decoder {
     std::atomic<bool> canceled{false};
     std::atomic<bool> failed{false};
     std::string error;
+    int failStatus = GAIL_ERROR_FAILED;  // what calls return once `failed` is set
 
     void log(gail_log_level level, const char* fmt, ...) {
         if (!cfg.log || level > cfg.log_level) return;
@@ -190,10 +191,11 @@ struct gail_decoder {
         cfg.log(cfg.log_user, level, buf);
     }
 
-    void setError(const std::string& what) {
+    void setError(const std::string& what, int status = GAIL_ERROR_FAILED) {
         std::lock_guard<std::mutex> l(m);
         if (failed.exchange(true)) return;
         error = what;
+        failStatus = status;
     }
 
     // First codestream: learn the picture's size and structure, make the frames in flight
@@ -201,6 +203,12 @@ struct gail_decoder {
     int setUp(const uint8_t* data, size_t size) {
         std::lock_guard<std::mutex> l(setupMutex);
         if (configured.load()) return GAIL_OK;
+        if (failed.load()) {
+            // A device failed setting up: that stops the decoder, rather than letting a later
+            // codestream (perhaps of another size) set it up afresh
+            std::lock_guard<std::mutex> lm(m);
+            return fail(failStatus, error);
+        }
         StreamHeader h;
         std::string err;
         if (!parseCodestream(data, size, true, h, err)) return fail(GAIL_ERROR_INVALID, err);
@@ -253,7 +261,7 @@ struct gail_decoder {
         if (workers.empty()) {
             const std::string why = "no device has room for a " + std::to_string(layout->width) + "x" +
                                     std::to_string(layout->height) + " frame" + (refused.empty() ? "" : ": " + refused);
-            setError(why);
+            setError(why, GAIL_ERROR_NOMEM);
             return fail(GAIL_ERROR_NOMEM, why);
         }
         pool = new ImagePool;
@@ -397,6 +405,11 @@ int prepareDestination(gail_decoder* d, Job& job, const gail_image* dest) {
     const ptrdiff_t tight = (ptrdiff_t)d->outW * 6;
     if (dest && dest->data[0]) {
         if (!allZero(dest->reserved)) return fail(GAIL_ERROR_INVALID, "gail_image.reserved must be zero");
+        // A buffer that says what size it is gets only a picture of that size
+        if ((dest->width || dest->height) && (dest->width != d->outW || dest->height != d->outH))
+            return fail(GAIL_ERROR_INVALID, "the buffer is for a " + std::to_string(dest->width) + "x" +
+                                                std::to_string(dest->height) + " picture, the decoder's are " +
+                                                std::to_string(d->outW) + "x" + std::to_string(d->outH));
         const ptrdiff_t stride = dest->stride[0] ? dest->stride[0] : tight;
         if (stride < tight)
             return fail(GAIL_ERROR_INVALID, "stride " + std::to_string(stride) + " is less than the " + std::to_string(tight) +

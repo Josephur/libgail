@@ -52,6 +52,7 @@ typedef struct LibGailDecContext {
     int pending;          /* s->pkt was refused for now (GAIL_EAGAIN): send it again */
     int full;             /* ... after receiving a picture, which is then waited for */
     int configured;       /* dimensions known from the first codestream */
+    int width, height;    /* its full size */
 
     int backend;
     char *devices;
@@ -164,6 +165,8 @@ static int configure(AVCodecContext *avctx, const AVPacket *pkt)
     if (ret < 0)
         return ret;
     avctx->profile = info.rsiz;  /* AV_PROFILE_JPEG2000_DCINEMA_2K / _4K */
+    s->width = info.width;
+    s->height = info.height;
     s->configured = 1;
     return 0;
 }
@@ -187,7 +190,18 @@ static int send_packet(AVCodecContext *avctx, AVPacket *pkt)
     if (!s->configured && (ret = configure(avctx, pkt)) < 0)
         return ret;
     if (avctx->skip_frame >= AVDISCARD_ALL)
-        return 0;
+        return 0; /* nothing is decoded, so nothing is written for it */
+    {
+        /* the frame buffers are sized for the first codestream: one of another size is
+           refused here (the library refuses it too, as dest says what size it is). One whose
+           header cannot be read goes on and fails in its place in the order. */
+        gail_stream_info info;
+        if (gail_probe(pkt->data, pkt->size, &info) == GAIL_OK && (info.width != s->width || info.height != s->height)) {
+            av_log(avctx, AV_LOG_ERROR, "codestream is %dx%d, the stream started at %dx%d\n",
+                   info.width, info.height, s->width, s->height);
+            return AVERROR_INVALIDDATA;
+        }
+    }
     if (!(frame = av_frame_alloc()))
         return AVERROR(ENOMEM);
     if ((ret = ff_decode_frame_props_from_pkt(avctx, frame, pkt)) < 0 ||
@@ -202,6 +216,8 @@ static int send_packet(AVCodecContext *avctx, AVPacket *pkt)
     gp.size = pkt->size;
     dest.data[0] = frame->data[0];
     dest.stride[0] = frame->linesize[0];
+    dest.width = frame->width;
+    dest.height = frame->height;
     ret = gail_decoder_send(s->dec, &gp, &dest); /* copies the codestream */
     if (ret == GAIL_EAGAIN) {
         /* as many pictures decoded as the library holds: receive one, then send this again */

@@ -471,7 +471,8 @@ decodes 4K several times faster than it plays; `num_devices = GAIL_ALL_DEVICES` 
   caller names its own buffer in `data[0]` with its row length in `stride[0]` (bytes, at
   least 6 × width, any alignment; bytes of a row past the picture are not written) and the
   picture is decoded straight into it: no copy, which is how the FFmpeg decoder fills
-  FFmpeg's frames. A buffer handed to `gail_decoder_send()` must stay valid until its image
+  FFmpeg's frames. Setting `width` and `height` too makes the decoder refuse
+  (`GAIL_ERROR_INVALID`) to decode into it unless its pictures are that size. A buffer handed to `gail_decoder_send()` must stay valid until its image
   has been received, or `gail_decoder_flush()` or `gail_decoder_destroy()` has returned.
 * **Back-pressure:** the decoder holds only a few decoded pictures the app has not taken
   yet, about two more than its frames in flight, so a slow consumer does not make it pile
@@ -487,7 +488,8 @@ decodes 4K several times faster than it plays; `num_devices = GAIL_ALL_DEVICES` 
   its own: `gail_decoder_decode()` returns the status, and in pull or callback mode the
   image arrives in its place in the order with a negative `status` and no picture, with
   the reason in `gail_last_error()`. The decoder carries on. `gail_decoder_error()` is
-  only set when a device fails.
+  only set when a device fails; the decoder then stops, and every later send or decode
+  returns that failure.
 * **Seeking:** `gail_decoder_flush()` drops what was sent and not yet received.
   `gail_decoder_cancel()` stops everything at once.
 * **Device memory:** a frame in flight takes about 0.26 GB (4K) or 0.07 GB (2K) on a GPU.

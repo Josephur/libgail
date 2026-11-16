@@ -489,8 +489,9 @@ GAIL_API const char* gail_decoder_devices(const gail_decoder* d);  /* "NVIDIA ..
    receive it, then send the same codestream again. dest may be NULL (the library allocates the image; release it with
    gail_image_free()) or name the caller's buffer in dest->data[0] with its row length in
    dest->stride[0] (bytes; 0 = tightly packed, otherwise at least 6 x width; bytes of a row
-   past the picture are not written): the image is then decoded straight into it, and the
-   buffer must stay valid until that image has been received, or until gail_decoder_flush()
+   past the picture are not written; dest->width and dest->height, when not 0, must be the
+   size of the decoder's pictures, else GAIL_ERROR_INVALID): the image is then decoded
+   straight into it, and the buffer must stay valid until that image has been received, or until gail_decoder_flush()
    or gail_decoder_destroy() has returned. A NULL pkt ends the stream.
    A codestream that cannot be decoded still takes its place in the order: its image
    arrives with a negative status. */
@@ -523,7 +524,8 @@ GAIL_API int gail_decoder_finish(gail_decoder* d);
 GAIL_API void gail_decoder_cancel(gail_decoder* d);
 
 /* NULL while all is well, else what stopped the decoder (a device failure; a frame that
-   cannot be decoded does not stop it). */
+   cannot be decoded does not stop it). Once stopped, send and decode return that failure
+   and the decoder is not set up again: it needs to be destroyed. */
 GAIL_API const char* gail_decoder_error(const gail_decoder* d);
 
 #ifdef __cplusplus

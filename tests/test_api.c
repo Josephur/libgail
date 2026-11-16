@@ -694,6 +694,30 @@ static void test_decoder(void) {
     }
     gail_decoder_destroy(d);
 
+    /* a buffer that says what size it is: only a picture of that size goes into it */
+    gail_decoder_config_defaults(&dc);
+    d = NULL;
+    CHECK(gail_decoder_create(&dc, &d) == GAIL_OK, "decoder create (sized buffer): %s", gail_last_error());
+    if (d) {
+        uint8_t* mine = (uint8_t*)malloc((size_t)w * h * 6);
+        gail_image img;
+        memset(&img, 0, sizeof img);
+        img.data[0] = mine;
+        img.width = w / 2;
+        img.height = h / 2;
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_ERROR_INVALID && strstr(gail_last_error(), "buffer is for"),
+              "a %dx%d picture into a buffer for %dx%d: %s", w, h, w / 2, h / 2, gail_last_error());
+        printf("  rejected as expected: %s\n", gail_last_error());
+        CHECK(gail_decoder_send(d, &s.pkt[0], &img) == GAIL_ERROR_INVALID, "send into a buffer of another size accepted");
+        img.width = w;
+        img.height = h;
+        CHECK(gail_decoder_decode(d, &s.pkt[0], &img) == GAIL_OK && img.data[0] == mine &&
+                  memcmp(mine, frame0, (size_t)w * h * 6) == 0,
+              "decode into a buffer of the right size: %s", gail_last_error());
+        gail_decoder_destroy(d);
+        free(mine);
+    }
+
     /* pull: order kept, a damaged frame in the middle, one frame into a padded buffer of ours */
     gail_decoder_config_defaults(&dc);
     d = NULL;
