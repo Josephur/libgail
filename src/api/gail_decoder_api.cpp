@@ -505,8 +505,9 @@ int gail_decoder_create(const gail_decoder_config* c, gail_decoder** decoder) {
         std::vector<std::string> ids;
         for (int i = 0; cfg.device_ids && i < cfg.num_device_ids; ++i)
             if (cfg.device_ids[i]) ids.emplace_back(cfg.device_ids[i]);
-        // Nothing chosen: the first device, unless every one was asked for
-        if (select.empty() && ids.empty() && cfg.num_devices != GAIL_ALL_DEVICES) select.push_back(0);
+        // Nothing chosen: the first device each backend lists (not index 0, which may be a
+        // GPU the backend cannot use), unless every one was asked for
+        const bool firstOnly = select.empty() && ids.empty() && cfg.num_devices != GAIL_ALL_DEVICES;
         cfg.devices = nullptr;  // not kept: only read here
         cfg.device_ids = nullptr;
 
@@ -527,6 +528,14 @@ int gail_decoder_create(const gail_decoder_config* c, gail_decoder** decoder) {
             }
             try {
                 std::string chosen;
+                if (firstOnly) {
+                    const std::vector<DeviceInfo> listed = listDevices(b, chosen);
+                    if (listed.empty()) {
+                        why = "no usable " + b + " devices";
+                        continue;
+                    }
+                    select = {listed[0].index};
+                }
                 d->devices = createDevices(b, select, ids, cfg.cpu_threads, cfg.low_priority != 0, deviceLog, chosen);
                 d->backend = chosen;
                 break;

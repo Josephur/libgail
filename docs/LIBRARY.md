@@ -443,8 +443,10 @@ file holds them (the caller unwraps the MXF, and decrypts it if it is encrypted)
 returns pictures. It uses the same backends and devices as the encoder, chosen the same
 way (`backend`, `devices` / `device_ids`, `frames_in_flight`, `cpu_threads`,
 `low_priority`, `log` in `gail_decoder_config`), with the same hardware requirements.
-One difference: with no devices named, a decoder uses only the first device, since one GPU
-decodes 4K several times faster than it plays; `num_devices = GAIL_ALL_DEVICES` (with
+One difference: with no devices named, a decoder uses only the first device its backend
+lists (`gail_enumerate_devices()`), since one GPU decodes 4K several times faster than it
+plays. A GPU the backend cannot run is not listed, so with `GAIL_BACKEND_AUTO` a first
+GPU that no CUDA plugin has code for leaves the decoder on CUDA with the next one; `num_devices = GAIL_ALL_DEVICES` (with
 `devices` NULL) uses every device.
 
 | | How | Typical caller |

@@ -21,7 +21,7 @@ A decoder. Everything the 1.0 header declared is unchanged. The encoder codes fr
   `xyz12le`, the default) or the low bits, into the library's buffer or straight into the
   caller's with the caller's row length.
 * `gail_decoder_config.reduce` leaves out resolution levels: half size, quarter size.
-* A decoder with no devices named uses the first device of its backend, since one GPU
+* A decoder with no devices named uses the first device its backend lists, since one GPU
   decodes 4K several times faster than it plays; `num_devices = GAIL_ALL_DEVICES` with
   `devices` NULL uses every device.
 * `gail_probe()` reads a codestream's header and says what it is and whether it can be

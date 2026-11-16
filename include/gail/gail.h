@@ -446,8 +446,9 @@ typedef void (*gail_image_cb)(void* user, const gail_image* img); /* img->data v
 typedef struct gail_decoder_config {
     size_t struct_size;       /* sizeof(gail_decoder_config), set by gail_decoder_config_defaults() */
     gail_backend backend;
-    /* Device indices to use. NULL: the first device only (one GPU keeps up with playback
-       several times over); NULL with num_devices = GAIL_ALL_DEVICES: every device. */
+    /* Device indices to use. NULL: only the first device the backend lists (one GPU keeps
+       up with playback several times over; a GPU the backend cannot run is not listed);
+       NULL with num_devices = GAIL_ALL_DEVICES: every device. */
     const int* devices;
     int num_devices;
     const char* const* device_ids;  /* or by ID, as gail_config.device_ids */
