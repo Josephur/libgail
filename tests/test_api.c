@@ -24,6 +24,14 @@ static void thread_join(thread_t t) {
 }
 static double now_ms(void) { return (double)GetTickCount64(); }
 static void sleep_ms(int ms) { Sleep(ms); }
+typedef DWORD thread_id;
+static thread_id thread_self(void) { return GetCurrentThreadId(); }
+static int thread_same(thread_id a, thread_id b) { return a == b; }
+typedef CRITICAL_SECTION lock_t;
+static void lock_init(lock_t* l) { InitializeCriticalSection(l); }
+static void lock_free(lock_t* l) { DeleteCriticalSection(l); }
+static void lock_take(lock_t* l) { EnterCriticalSection(l); }
+static void lock_give(lock_t* l) { LeaveCriticalSection(l); }
 #else
 #include <pthread.h>
 #include <time.h>
@@ -41,6 +49,14 @@ static void sleep_ms(int ms) {
     struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
     nanosleep(&ts, NULL);
 }
+typedef pthread_t thread_id;
+static thread_id thread_self(void) { return pthread_self(); }
+static int thread_same(thread_id a, thread_id b) { return pthread_equal(a, b); }
+typedef pthread_mutex_t lock_t;
+static void lock_init(lock_t* l) { pthread_mutex_init(l, NULL); }
+static void lock_free(lock_t* l) { pthread_mutex_destroy(l); }
+static void lock_take(lock_t* l) { pthread_mutex_lock(l); }
+static void lock_give(lock_t* l) { pthread_mutex_unlock(l); }
 #endif
 
 static int failures = 0;
@@ -529,6 +545,29 @@ static thread_ret THREAD_FN dec_worker(void* arg) {
 
 /* ---- decoder: the threading contracts of gail.h, on the CPU backend ---------------------- */
 
+/* A flag one thread raises and another waits for, with a time limit. */
+typedef struct dec_flag {
+    lock_t lock;
+    int value;
+} dec_flag;
+static void flag_raise(dec_flag* f, int v) {
+    lock_take(&f->lock);
+    f->value = v;
+    lock_give(&f->lock);
+}
+static int flag_get(dec_flag* f) {
+    lock_take(&f->lock);
+    const int v = f->value;
+    lock_give(&f->lock);
+    return v;
+}
+/* Waits up to ms for the flag to be raised; returns its value (0: it was not). */
+static int flag_wait(dec_flag* f, int ms) {
+    int v = 0;
+    for (double end = now_ms() + ms; !(v = flag_get(f)) && now_ms() < end;) sleep_ms(2);
+    return v;
+}
+
 static gail_decoder* dec_cpu(gail_image_cb on_image, void* user) {
     gail_decoder_config dc;
     gail_decoder_config_defaults(&dc);
@@ -556,6 +595,44 @@ static thread_ret THREAD_FN dec_blocked_run(void* arg) {
     b->result = gail_decoder_decode(b->d, b->pkt, &b->img);
     b->returned = now_ms();
     return 0;
+}
+
+/* on_image of the contract tests: on which thread and in what order images arrive, and
+   what a send or a decode from inside the callback does */
+typedef struct dec_contract {
+    const dec_set* s;
+    gail_decoder* d;
+    thread_id app; /* the thread that sends */
+    int calls, on_app, out_of_order;
+    int status[8];
+    int nest;        /* on image 0: 1 = send a codestream, 2 = decode one */
+    int nested;      /* what that call returned */
+    dec_flag queued; /* the app has queued its second codestream */
+    dec_flag back;   /* the nested call has come back */
+} dec_contract;
+static void dec_contract_image(void* user, const gail_image* img) {
+    dec_contract* c = (dec_contract*)user;
+    if (thread_same(thread_self(), c->app)) ++c->on_app;
+    if (img->index != c->calls) ++c->out_of_order;
+    if (c->calls < 8) c->status[c->calls] = img->status;
+    ++c->calls;
+    if (img->index == 0 && c->nest) {
+        /* the only frame in flight is this thread's, and the app's next codestream waits
+           in the queue: nothing else can make room for a call that waits for room */
+        flag_wait(&c->queued, 10000);
+        if (c->nest == 1) {
+            c->nested = gail_decoder_send(c->d, &c->s->pkt[2], NULL);
+        } else {
+            gail_image out;
+            memset(&out, 0, sizeof out);
+            c->nested = gail_decoder_decode(c->d, &c->s->pkt[2], &out);
+            if (c->nested == GAIL_OK &&
+                psnr_xyz((const uint8_t*)out.data[0], out.stride[0], c->s->src[2], out.width, out.height, 4) < 40)
+                c->nested = GAIL_ERROR_FAILED;
+            gail_image_free(&out);
+        }
+        flag_raise(&c->back, 1);
+    }
 }
 
 static void test_decoder_contracts(const dec_set* s) {
@@ -592,6 +669,50 @@ static void test_decoder_contracts(const dec_set* s) {
         }
     }
 
+    static uint8_t soc_only[2] = {0xFF, 0x4F}; /* a codestream cut off after SOC */
+    gail_packet cut;
+    memset(&cut, 0, sizeof cut);
+    cut.data = soc_only;
+    cut.size = sizeof soc_only;
+
+    /* A first codestream the decoder cannot be set up from: its image still comes from a
+       decoder thread, never from inside gail_decoder_send() */
+    {
+        dec_contract c;
+        memset(&c, 0, sizeof c);
+        c.s = s;
+        c.app = thread_self();
+        gail_decoder* d = dec_cpu(dec_contract_image, &c);
+        if (d) {
+            CHECK(gail_decoder_send(d, &cut, NULL) == GAIL_OK, "send of a cut-off first codestream: %s", gail_last_error());
+            CHECK(gail_decoder_finish(d) == GAIL_OK, "finish after a cut-off codestream: %s", gail_last_error());
+            CHECK(c.calls == 1 && c.status[0] == GAIL_ERROR_INVALID, "cut-off codestream alone: %d images, status %d", c.calls,
+                  c.status[0]);
+            CHECK(c.on_app == 0, "on_image ran on the sending thread for a codestream that cannot set up the decoder");
+            gail_decoder_destroy(d);
+        }
+        memset(&c, 0, sizeof c);
+        c.s = s;
+        c.app = thread_self();
+        d = dec_cpu(dec_contract_image, &c);
+        if (d) {
+            CHECK(gail_decoder_send(d, &cut, NULL) == GAIL_OK, "send of a cut-off first codestream: %s", gail_last_error());
+            CHECK(gail_decoder_send(d, &cut, NULL) == GAIL_OK, "send of a second cut-off codestream: %s", gail_last_error());
+            CHECK(gail_decoder_send(d, &s->pkt[0], NULL) == GAIL_OK, "send after cut-off codestreams: %s", gail_last_error());
+            CHECK(gail_decoder_send(d, &cut, NULL) == GAIL_OK, "send of a cut-off codestream: %s", gail_last_error());
+            CHECK(gail_decoder_finish(d) == GAIL_OK, "finish: %s", gail_last_error());
+            CHECK(c.calls == 4 && c.out_of_order == 0 && c.status[0] == GAIL_ERROR_INVALID && c.status[1] == GAIL_ERROR_INVALID &&
+                      c.status[2] == GAIL_OK && c.status[3] == GAIL_ERROR_INVALID,
+                  "cut-off codestreams around a good one: %d images, %d out of order, statuses %d %d %d %d", c.calls,
+                  c.out_of_order, c.status[0], c.status[1], c.status[2], c.status[3]);
+            CHECK(c.on_app == 0, "on_image ran on the sending thread %d times", c.on_app);
+            gail_decoder_destroy(d);
+        }
+    }
+
+    /* A send, or a blocking decode, from inside on_image with one frame in flight and the
+       app's next codestream queued: neither waits for the queue that only this thread
+       could work off */
 }
 
 static void test_decoder(void) {

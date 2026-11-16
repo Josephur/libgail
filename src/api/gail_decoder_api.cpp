@@ -169,6 +169,12 @@ struct gail_decoder {
     int outstanding = 0;    // ordered jobs of this epoch queued or being decoded
     int activeOrdered = 0;  // ordered jobs of any epoch being decoded
     bool delivering = false;  // an on_image call is under way
+    // Callback mode: passes on images that no worker finished, those of codestreams the
+    // decoder could not be set up from (there may be no workers yet), so that on_image
+    // runs on a decoder thread and never inside gail_decoder_send(). Started when needed.
+    std::thread courier;
+    std::condition_variable courierCv;
+    bool courierDue = false;
 
     // Decoded pictures that wait for the app, gail_decoder_receive() or on_image: at most
     // about this many before send waits (callback mode) or says GAIL_EAGAIN (pull mode), so
@@ -289,7 +295,7 @@ struct gail_decoder {
             }
             doneCv.notify_all();  // room in the queue
             decodeOne(*job, w);
-            finished(job);
+            finished(job, true);
         }
     }
 
@@ -343,21 +349,42 @@ struct gail_decoder {
         }
     }
 
-    // A worker is done with a job (or it never needed one): hand it to its waiter, or put
-    // it in line for delivery in send order.
-    void finished(const std::shared_ptr<Job>& job, bool wasActive = true) {
+    // A worker is done with a job (fromWorker), or the job never needed one: hand it to
+    // its waiter, or put it in line for delivery in send order.
+    void finished(const std::shared_ptr<Job>& job, bool fromWorker) {
         std::unique_lock<std::mutex> l(m);
         job->done = true;
+        bool wake = false;
         if (job->ordered) {
-            if (wasActive) --activeOrdered;
+            if (fromWorker) --activeOrdered;
             if (job->epoch == epoch && !canceled.load()) {
                 --outstanding;
                 ready[job->index] = job;
-                if (cfg.on_image) deliver(l);
+                if (cfg.on_image && fromWorker) {
+                    deliver(l);
+                } else if (cfg.on_image) {
+                    courierDue = wake = true;
+                    if (!courier.joinable()) courier = std::thread([this] { runCourier(); });
+                }
             }
         }
         l.unlock();
+        if (wake) courierCv.notify_one();
         doneCv.notify_all();
+    }
+
+    void runCourier() {
+        if (cfg.low_priority) lowerCurrentThreadPriority();
+        std::unique_lock<std::mutex> l(m);
+        for (;;) {
+            courierCv.wait(l, [&] { return quit || courierDue; });
+            if (quit) return;
+            courierDue = false;
+            deliver(l);
+            l.unlock();
+            doneCv.notify_all();  // delivering is over
+            l.lock();
+        }
     }
 
     // Callback mode: pass on every image whose turn has come. One thread at a time does
@@ -392,9 +419,11 @@ struct gail_decoder {
             queue.clear();
         }
         workCv.notify_all();
+        courierCv.notify_all();
         doneCv.notify_all();
         for (auto& w : workers)
             if (w->thread.joinable()) w->thread.join();
+        if (courier.joinable()) courier.join();
     }
 };
 
@@ -617,7 +646,7 @@ int gail_decoder_send(gail_decoder* d, const gail_packet* pkt, const gail_image*
             d->workCv.notify_one();
         } else {
             l.unlock();
-            d->finished(job, false);
+            d->finished(job, false);  // passed on by the courier, not on this thread
         }
         return GAIL_OK;
     } catch (const std::bad_alloc&) {
